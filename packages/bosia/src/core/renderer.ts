@@ -15,7 +15,6 @@ import {
 	coalesceMiss,
 	collectTags,
 	computeCacheKey,
-	concatChunks,
 	deferCacheWrite,
 	serveCached,
 } from "./cache.ts";
@@ -823,17 +822,15 @@ export async function renderSSRStream(
 		// compressed — a stream here never streamed, it only skipped compression.
 		// Truly progressive SSR (ROADMAP) would pipe a stream through
 		// CompressionStream instead.
-		const chunks: Uint8Array[] = [
-			enc.encode(
-				buildHtmlShellOpen(
-					metadata?.lang,
-					nonce,
-					appHtmlSegments,
-					data.csr ? route.pattern : undefined,
-				),
-			),
-			enc.encode(buildMetadataChunk(metadata, headExtras, appHtmlSegments)),
-			enc.encode(
+		// One string, encoded once: three encodes plus a concat copied every byte twice.
+		const fullBody = enc.encode(
+			buildHtmlShellOpen(
+				metadata?.lang,
+				nonce,
+				appHtmlSegments,
+				data.csr ? route.pattern : undefined,
+			) +
+				buildMetadataChunk(metadata, headExtras, appHtmlSegments) +
 				buildHtmlTail(
 					body,
 					head,
@@ -848,10 +845,7 @@ export async function renderSSRStream(
 					data.layoutDeps,
 					appHtmlSegments,
 				),
-			),
-		];
-
-		const fullBody = concatChunks(chunks);
+		) as Uint8Array<ArrayBuffer>;
 		// Set only on a cache write: the client's variant, encoded once at cache
 		// quality and shared by the response and the cache entry.
 		let sent: Encoded | null | undefined;
