@@ -215,6 +215,14 @@
 		// the mask actually run server-side.
 		const maskBits = (pageRun ? "1" : "0") + layoutRunFlags.map((b) => (b ? "1" : "0")).join("");
 
+		// An invalidate() since the last nav — tick bump or any dirty entry —
+		// must read past the server's response cache, not just re-run loaders.
+		const fresh =
+			invalidated ||
+			appState.dirty.keys.size > 0 ||
+			appState.dirty.urls.size > 0 ||
+			appState.dirty.urlMatchers.length > 0;
+
 		// Clear dirty set now — we've baked it into the mask.
 		clearDirty();
 
@@ -240,7 +248,7 @@
 		const dataFetch = cached
 			? Promise.resolve(cached)
 			: match.route.hasServerData
-				? fetch(dataUrl(path, prerendered ? undefined : maskBits), dataInit)
+				? fetch(dataUrl(path, prerendered ? undefined : maskBits, fresh && !prerendered), dataInit)
 						.then(readDataResponse)
 						// Only a failed request reaches here now — offline, DNS, aborted.
 						// A response that arrived is read for what it says, not discarded.
