@@ -61,6 +61,26 @@ export function prerenderSkipReason(src: string): string | null {
 	return null;
 }
 
+/**
+ * False only when a server module's source plainly has no `metadata` export.
+ * Anything the regex can't rule out — a `metadata` in an export list, an
+ * `export *`, an unreadable file — counts as present, which only costs the
+ * client a fetch it could have skipped.
+ */
+export function hasMetadataExport(src: string): boolean {
+	return /export\s+(const|let|var|async\s+function|function)\s+metadata\b|export\s*\{[^}]*\bmetadata\b|export\s*\*/.test(
+		src,
+	);
+}
+
+function readHasMetadata(filePath: string): boolean {
+	try {
+		return hasMetadataExport(readFileSync(filePath, "utf-8"));
+	} catch {
+		return true;
+	}
+}
+
 /** True when the page will really be prerendered — the client fetches its data as a static file. */
 function readPrerender(filePath: string): boolean {
 	try {
@@ -167,6 +187,7 @@ export function scanRoutes(): RouteManifest {
 				trailingSlash: effectiveTs,
 				cache: readPageCache(join(ROUTES_DIR, pageFile)),
 				prerender: pageServerFile ? readPrerender(join(ROUTES_DIR, pageServerFile)) : false,
+				hasMetadata: pageServerFile ? readHasMetadata(join(ROUTES_DIR, pageServerFile)) : false,
 			});
 		}
 

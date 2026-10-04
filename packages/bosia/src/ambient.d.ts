@@ -12,6 +12,8 @@ declare module "bosia:routes" {
 		hasServerData: boolean;
 		trailingSlash: TrailingSlash;
 		prerender: boolean;
+		/** +page.server.ts may export metadata() — the head can change on navigation. */
+		hasMetadata: boolean;
 	}>;
 
 	export const serverRoutes: Array<{

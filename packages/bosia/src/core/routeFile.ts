@@ -69,6 +69,7 @@ export function generateRoutesFile(manifest: RouteManifest): void {
 	lines.push("  loading: (() => Promise<any>) | null;");
 	lines.push("  layoutPaths: string[];");
 	lines.push("  prerender: boolean;");
+	lines.push("  hasMetadata: boolean;");
 	lines.push("}> = [");
 	for (const r of pages) {
 		const layoutImports = r.layouts
@@ -104,6 +105,8 @@ export function generateRoutesFile(manifest: RouteManifest): void {
 		);
 		lines.push(`    layoutPaths: ${JSON.stringify(r.layouts)},`);
 		lines.push(`    prerender: ${r.prerender},`);
+		// Older cached scans lack the field: assume metadata() exists.
+		lines.push(`    hasMetadata: ${r.pageServer ? (r.hasMetadata ?? true) : false},`);
 		lines.push("  },");
 	}
 	lines.push("];\n");
@@ -207,6 +210,7 @@ function generateClientRoutesFile(
 	lines.push("  loading: (() => Promise<any>) | null;");
 	lines.push("  layoutPaths: string[];");
 	lines.push("  prerender: boolean;");
+	lines.push("  hasMetadata: boolean;");
 	lines.push("}> = [");
 	for (const r of pages) {
 		const layoutImports = r.layouts
@@ -239,6 +243,8 @@ function generateClientRoutesFile(
 		);
 		lines.push(`    layoutPaths: ${JSON.stringify(r.layouts)},`);
 		lines.push(`    prerender: ${r.prerender},`);
+		// Older cached scans lack the field: assume metadata() exists.
+		lines.push(`    hasMetadata: ${r.pageServer ? (r.hasMetadata ?? true) : false},`);
 		lines.push("  },");
 	}
 	lines.push("];\n");

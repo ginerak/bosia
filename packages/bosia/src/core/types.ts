@@ -36,6 +36,8 @@ export interface PageRoute {
 	cache: boolean | null;
 	/** `export const prerender = true` in +page.server.ts — its data is a static file at runtime. */
 	prerender: boolean;
+	/** +page.server.ts may export `metadata()`. Missing (an older scan) means "may". */
+	hasMetadata?: boolean;
 }
 
 /** An API route discovered from the file system */

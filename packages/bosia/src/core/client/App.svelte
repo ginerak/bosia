@@ -237,15 +237,27 @@
 						body: JSON.stringify({ parentSnapshots: snapshots }),
 					}
 				: {};
+		// Nothing to ask the server: every loader's cached data is still valid and
+		// there's no metadata() whose head could differ. Answer with the same
+		// all-skipped shape the server would have sent.
+		const nothingToFetch =
+			match.route.hasServerData && !maskBits.includes("1") && !match.route.hasMetadata;
 		const dataFetch = cached
 			? Promise.resolve(cached)
-			: match.route.hasServerData
-				? fetch(dataUrl(path, prerendered ? undefined : maskBits), dataInit)
-						.then(readDataResponse)
-						// Only a failed request reaches here now — offline, DNS, aborted.
-						// A response that arrived is read for what it says, not discarded.
-						.catch(() => null)
-				: Promise.resolve(null);
+			: nothingToFetch
+				? Promise.resolve({
+						// A route without +page.server.ts gets `{ params }` back, not a skip.
+						pageData: pageId === null ? { params: match.params } : null,
+						layoutData: [],
+						metadata: null,
+					})
+				: match.route.hasServerData
+					? fetch(dataUrl(path, prerendered ? undefined : maskBits), dataInit)
+							.then(readDataResponse)
+							// Only a failed request reaches here now — offline, DNS, aborted.
+							// A response that arrived is read for what it says, not discarded.
+							.catch(() => null)
+					: Promise.resolve(null);
 
 		const settle = (target: { url: URL; params: Record<string, string> } | null) => {
 			const nav: Navigation = {

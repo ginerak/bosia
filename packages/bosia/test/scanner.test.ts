@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { dirname, join } from "path";
-import { scanRoutes, RouteConflictError } from "../src/core/scanner.ts";
+import { scanRoutes, RouteConflictError, hasMetadataExport } from "../src/core/scanner.ts";
 
 let originalCwd: string;
 let tmpDir: string;
@@ -206,5 +206,29 @@ describe("scanRoutes() route conflicts", () => {
 		write("blog/[...rest]/+page.svelte");
 		write("about/+server.ts");
 		expect(conflict()).toBe(null);
+	});
+});
+
+describe("hasMetadata", () => {
+	test("hasMetadataExport() sees every way to export metadata", () => {
+		expect(hasMetadataExport("export function metadata() {}")).toBe(true);
+		expect(hasMetadataExport("export async function metadata() {}")).toBe(true);
+		expect(hasMetadataExport("export const metadata = () => ({})")).toBe(true);
+		expect(hasMetadataExport("const m = 1;\nexport { load, m as metadata };")).toBe(true);
+		// Can't see through a star re-export, so it counts as present.
+		expect(hasMetadataExport('export * from "./shared";')).toBe(true);
+		expect(hasMetadataExport("export const load = async () => ({})")).toBe(false);
+		expect(hasMetadataExport("export const load = () => ({ metadataLike: 1 })")).toBe(false);
+	});
+
+	test("scanRoutes() records it per page", () => {
+		write("a/+page.svelte");
+		write("a/+page.server.ts", "export const load = async () => ({})");
+		write("b/+page.svelte");
+		write("b/+page.server.ts", "export function metadata() { return {}; }");
+		write("c/+page.svelte");
+		const m = scanRoutes();
+		const byPattern = Object.fromEntries(m.pages.map((p) => [p.pattern, p.hasMetadata]));
+		expect(byPattern).toEqual({ "/a": false, "/b": true, "/c": false });
 	});
 });
