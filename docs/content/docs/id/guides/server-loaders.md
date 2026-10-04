@@ -67,6 +67,18 @@ export async function load({ params, parent }: LoadEvent) {
 
 Data mengalir dari atas ke bawah melalui **loader**: layout root → layout grup → layout halaman → halaman. Setiap loader melihat hasil induknya via `parent()`, tetapi tidak ada yang otomatis digabung ke prop `data` komponen — kembalikan ulang key yang Anda perlukan (seperti `appName` di atas) agar halaman bisa membacanya. Halaman tanpa `load()` tidak bisa memanggil `parent()`; tambahkan loader minimal yang mengembalikan `await parent()` untuk meneruskan data layout.
 
+Semua loader dalam satu rute dimulai bersamaan. Sebuah loader hanya menunggu induknya ketika memanggil `await parent()`, jadi loader yang tidak butuh data induk berjalan berdampingan, bukan bergiliran. Panggil `parent()` setelah memulai pekerjaan Anda sendiri yang tidak bergantung padanya, bukan sebelumnya, agar tetap tumpang tindih:
+
+```ts
+export async function load({ params, parent }: LoadEvent) {
+	const postPromise = db.getPost(params.slug); // langsung dimulai
+	const { appName } = await parent(); // menunggu layout
+	return { post: await postPromise, appName };
+}
+```
+
+Karena `load()` halaman bisa mulai sebelum `load()` layout selesai, jangan andalkan loader layout untuk memblokir akses ke halaman. Periksa akses di `hooks.server.ts` (lihat [Middleware Hooks](/id/guides/middleware-hooks)), atau `await parent()` lebih dulu di loader halaman.
+
 ## Metadata
 
 Ekspor fungsi `metadata` untuk mengatur judul halaman dan meta tag:

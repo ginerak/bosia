@@ -7,6 +7,7 @@ import { loadPlugins } from "./config.ts";
 import { readArtifact } from "./artifacts.ts";
 import { getPlatform, warmingUp } from "./platform.ts";
 import type { RouteManifest } from "./types.ts";
+import type { Metadata } from "./hooks.ts";
 
 // Pre-compile route patterns into RegExp at startup (shared by renderer.ts via module reference)
 compileRoutes(apiRoutes);
@@ -292,42 +293,36 @@ async function resolve(event: RequestEvent): Promise<Response> {
 				}
 			}
 			const runLoad = async () => {
+				// metadata() and the loaders start together; only the page load()
+				// waits on metadata.data, the same input it gets during SSR.
+				// metadata() failures stay non-fatal here, as before.
+				const metaP: Promise<Metadata | null> = pageMatch
+					? loadMetadata(pageMatch.route, pageMatch.params, routeUrl, locals, cookies, request)
+					: Promise.resolve(null);
+				const metaOrNull = metaP.catch(() => null);
 				const data = await loadRouteData(
 					routeUrl,
 					locals,
 					request,
 					cookies,
-					null,
+					metaOrNull.then((m) => m?.data ?? null),
 					pageMatch,
 					mask,
 					parentSnapshots,
 				);
 
 				let metadata = null;
-				if (pageMatch) {
-					try {
-						const meta = await loadMetadata(
-							pageMatch.route,
-							pageMatch.params,
-							routeUrl,
-							locals,
-							cookies,
-							request,
-						);
-						// Explicit whitelist, not a spread: `metadata.data` feeds load() on the
-						// server and may hold secrets — it must not reach the client.
-						if (meta)
-							metadata = {
-								title: meta.title,
-								description: meta.description,
-								meta: meta.meta,
-								link: meta.link,
-								lang: meta.lang,
-							};
-					} catch {
-						/* non-fatal */
-					}
-				}
+				const meta = await metaOrNull;
+				// Explicit whitelist, not a spread: `metadata.data` feeds load() on the
+				// server and may hold secrets — it must not reach the client.
+				if (meta)
+					metadata = {
+						title: meta.title,
+						description: meta.description,
+						meta: meta.meta,
+						link: meta.link,
+						lang: meta.lang,
+					};
 
 				return { data, metadata, cookiesAccessed: (cookies as CookieJar).accessed };
 			};

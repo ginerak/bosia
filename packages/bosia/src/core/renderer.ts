@@ -41,6 +41,13 @@ import type { Metadata } from "./hooks.ts";
 import { loadPlugins } from "./config.ts";
 import { getPlatform, warmingUp } from "./platform.ts";
 import { reportDevErrorFromCatch } from "./devErrorReport.ts";
+import {
+	LoadTimeoutError,
+	runLoaderChain,
+	timedLoad,
+	type LoaderLayer,
+	type Parent,
+} from "./loaderChain.ts";
 import { dev500Response } from "./dev-500.ts";
 import type { BosiaPlugin, RenderContext } from "./types/plugin.ts";
 import { getAppHtmlSegments } from "./appHtml.ts";
@@ -128,13 +135,6 @@ async function pluginRenderFragments(
 
 // ─── Timeout Helpers ─────────────────────────────────────
 
-class LoadTimeoutError extends Error {
-	constructor(label: string, ms: number) {
-		super(`${label} timed out after ${ms}ms`);
-		this.name = "LoadTimeoutError";
-	}
-}
-
 function parseTimeout(raw: string | undefined, fallback: number): number {
 	if (!raw || raw === "Infinity") return 0;
 	const n = parseInt(raw, 10);
@@ -153,6 +153,12 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 			(_, reject) => (timer = setTimeout(() => reject(new LoadTimeoutError(label, ms)), ms)),
 		),
 	]);
+}
+
+function logLoadError(kind: "Layout" | "Page", err: unknown): void {
+	if (isDev) console.error(`${kind} server load error:`, err);
+	else console.error(`${kind} server load error:`, (err as Error).message ?? err);
+	if (isDev) reportDevErrorFromCatch(err);
 }
 
 // ─── Internal-Host Allowlist ─────────────────────────────
@@ -383,7 +389,7 @@ export async function loadRouteData(
 	locals: Record<string, any>,
 	req: Request,
 	cookies: Cookies,
-	metadataData: Record<string, any> | null = null,
+	metadataData: Record<string, any> | null | Promise<Record<string, any> | null> = null,
 	match?: RouteMatch<(typeof serverRoutes)[number]> | null,
 	mask?: LoaderMask,
 	parentSnapshots?: Record<number, Record<string, any>>,
@@ -396,35 +402,37 @@ export async function loadRouteData(
 	const origin = url.origin;
 	const layoutData: (Record<string, any> | null)[] = [];
 	const layoutDeps: (LoaderDeps | null)[] = [];
-	let parentData: Record<string, any> = {};
 	// Shared across layout + page loaders so cross-loader duplicate
 	// setHeaders() calls throw. Keys stored lowercased.
 	const loaderHeaders: Record<string, string> = {};
 	const setHeaders = makeSetHeaders(loaderHeaders);
 
-	// Run layout server loaders root → leaf, each gets parent() data
-	for (const ls of route.layoutServers) {
-		const skip = mask && mask.layouts[ls.depth] === false;
-		try {
-			if (skip) {
+	// Layout server loaders root → leaf, then the page — all started together.
+	// Each one's parent() waits on the layers above it (see loaderChain.ts).
+	const layers: LoaderLayer[] = route.layoutServers.map(
+		(ls: { loader: () => Promise<any>; depth: number }) => async (parent: Parent) => {
+			if (mask && mask.layouts[ls.depth] === false) {
 				layoutData[ls.depth] = null;
 				layoutDeps[ls.depth] = null;
 				// Skipped layers contribute their client-cached data (forwarded as
 				// parentSnapshots) to the parent chain, so downstream loaders that DO
 				// re-run see real parent() data. Falls back to {} when no snapshot was
 				// sent. Perf hint only — never authoritative for authz (use locals).
-				parentData = { ...parentData, ...(parentSnapshots?.[ls.depth] ?? {}) };
-				continue;
+				return parentSnapshots?.[ls.depth] ?? {};
 			}
 			const mod = await ls.loader();
-			if (typeof mod.load === "function" && !warmingUp) {
-				// Snapshot per layer so loaders cannot mutate the shared accumulator,
-				// preserving the same isolation semantics as the previous merge-on-call code.
-				const snapshot = { ...parentData };
-				const parent = async () => snapshot;
-				const deps = emptyDeps();
-				const result =
-					(await withTimeout(
+			if (typeof mod.load !== "function" || warmingUp) {
+				layoutData[ls.depth] = {};
+				layoutDeps[ls.depth] = emptyDeps();
+				return {};
+			}
+			const deps = emptyDeps();
+			const result =
+				(await timedLoad(
+					parent,
+					LOAD_TIMEOUT,
+					`layout load (depth=${ls.depth}, ${url.pathname})`,
+					(parent) =>
 						mod.load({
 							params: trackedParams(params, deps),
 							url: trackedUrl(url, deps),
@@ -437,114 +445,110 @@ export async function loadRouteData(
 							platform: getPlatform(),
 							setHeaders,
 						}),
-						LOAD_TIMEOUT,
-						`layout load (depth=${ls.depth}, ${url.pathname})`,
-					)) ?? {};
-				layoutData[ls.depth] = result;
-				layoutDeps[ls.depth] = deps;
-				parentData = { ...parentData, ...result };
-			} else {
-				layoutData[ls.depth] = {};
-				layoutDeps[ls.depth] = emptyDeps();
-			}
-		} catch (err) {
-			if (isRedirect(err)) throw err;
-			if (isHttpError(err)) {
-				stampErrorContext(
-					err,
-					ls.depth,
-					"layout",
-					layoutData.map((d) => d ?? {}),
-				);
-				throw err;
-			}
-			if (isDev) console.error("Layout server load error:", err);
-			else console.error("Layout server load error:", (err as Error).message ?? err);
-			if (isDev) reportDevErrorFromCatch(err);
-			const wrapped = new HttpError(500, "Internal Server Error");
-			stampErrorContext(
-				wrapped,
-				ls.depth,
-				"layout",
-				layoutData.map((d) => d ?? {}),
-			);
-			throw wrapped;
-		}
-	}
+				)) ?? {};
+			layoutData[ls.depth] = result;
+			layoutDeps[ls.depth] = deps;
+			return result;
+		},
+	);
 
-	// Run page server loader
-	let pageData: Record<string, any> | null = null;
-	let pageDeps: LoaderDeps | null = null;
-	let csr = true;
-	let ssr = true;
+	// Written from inside the page layer; an object so TypeScript doesn't narrow
+	// the fields to their initial values at the read below.
+	const page: {
+		data: Record<string, any> | null;
+		deps: LoaderDeps | null;
+		csr: boolean;
+		ssr: boolean;
+	} = { data: null, deps: null, csr: true, ssr: true };
 	const skipPage = mask && mask.page === false;
-	if (route.pageServer) {
-		try {
-			const mod = await route.pageServer();
-			if (mod.csr === false) csr = false;
-			if (mod.ssr === false) ssr = false;
-			if (skipPage) {
-				pageData = null;
-				pageDeps = null;
-			} else if (typeof mod.load === "function" && !warmingUp) {
-				const snapshot = { ...parentData };
-				const parent = async () => snapshot;
-				const deps = emptyDeps();
-				pageData =
-					(await withTimeout(
-						mod.load({
-							params: trackedParams(params, deps),
-							url: trackedUrl(url, deps),
-							locals,
-							cookies: trackedCookies(cookies, deps),
-							parent,
-							fetch: trackedFetch(fetch, origin, deps),
-							metadata: metadataData,
-							depends: makeDepends(deps),
-							platform: getPlatform(),
-							setHeaders,
-						}),
-						LOAD_TIMEOUT,
-						`page load (${url.pathname})`,
-					)) ?? {};
-				pageDeps = deps;
-			} else {
-				pageData = {};
-				pageDeps = emptyDeps();
-			}
-		} catch (err) {
-			if (isRedirect(err)) throw err;
-			if (isHttpError(err)) {
-				stampErrorContext(
-					err,
-					route.layoutModules.length,
-					"page",
-					layoutData.map((d) => d ?? {}),
-				);
-				throw err;
-			}
-			if (isDev) console.error("Page server load error:", err);
-			else console.error("Page server load error:", (err as Error).message ?? err);
-			if (isDev) reportDevErrorFromCatch(err);
-			const wrapped = new HttpError(500, "Internal Server Error");
-			stampErrorContext(
-				wrapped,
-				route.layoutModules.length,
-				"page",
-				layoutData.map((d) => d ?? {}),
-			);
-			throw wrapped;
+	layers.push(async (parent: Parent) => {
+		if (!route.pageServer) {
+			page.data = {};
+			page.deps = emptyDeps();
+			return {};
 		}
-	} else {
-		pageData = {};
-		pageDeps = emptyDeps();
+		const mod = await route.pageServer();
+		if (mod.csr === false) page.csr = false;
+		if (mod.ssr === false) page.ssr = false;
+		if (skipPage) return {};
+		if (typeof mod.load !== "function" || warmingUp) {
+			page.data = {};
+			page.deps = emptyDeps();
+			return {};
+		}
+		// metadata.data is the one input the page waits on besides parent().
+		const metadata = await metadataData;
+		const deps = emptyDeps();
+		page.data =
+			(await timedLoad(parent, LOAD_TIMEOUT, `page load (${url.pathname})`, (parent) =>
+				mod.load({
+					params: trackedParams(params, deps),
+					url: trackedUrl(url, deps),
+					locals,
+					cookies: trackedCookies(cookies, deps),
+					parent,
+					fetch: trackedFetch(fetch, origin, deps),
+					metadata,
+					depends: makeDepends(deps),
+					platform: getPlatform(),
+					setHeaders,
+				}),
+			)) ?? {};
+		page.deps = deps;
+		return {};
+	});
+
+	const settled = await runLoaderChain(layers);
+
+	// Report the failure nearest the root, as when layers ran one at a time: a
+	// child that failed because its parent() rejected carries the same error,
+	// and the parent's slot comes first.
+	const failedAt = settled.findIndex((s) => s.status === "rejected");
+	if (failedAt !== -1) {
+		const reported = (settled[failedAt] as PromiseRejectedResult).reason;
+		// When the reported failure is a crash, log independent crashes further
+		// down too, or they'd vanish. Not after a redirect()/error(): a layout
+		// guard that redirects a signed-out visitor is expected to make the page
+		// loader trip over the missing user, and that is not worth a log line.
+		const intentional = isRedirect(reported) || isHttpError(reported);
+		const logged = new Set<unknown>();
+		for (let i = failedAt + 1; i < settled.length && !intentional; i++) {
+			const s = settled[i]!;
+			if (s.status !== "rejected" || s.reason === reported || logged.has(s.reason)) continue;
+			if (isRedirect(s.reason) || isHttpError(s.reason)) continue;
+			logged.add(s.reason);
+			logLoadError(i < route.layoutServers.length ? "Layout" : "Page", s.reason);
+		}
+
+		const isPage = failedAt === route.layoutServers.length;
+		const depth = isPage ? route.layoutModules.length : route.layoutServers[failedAt]!.depth;
+		const origin: ErrorOrigin = isPage ? "page" : "layout";
+		// Only layers above the failure count as rendered parents.
+		const partial = layoutData.slice(0, depth).map((d) => d ?? {});
+		if (isRedirect(reported)) throw reported;
+		if (isHttpError(reported)) {
+			stampErrorContext(reported, depth, origin, partial);
+			throw reported;
+		}
+		logLoadError(isPage ? "Page" : "Layout", reported);
+		const wrapped = new HttpError(500, "Internal Server Error");
+		stampErrorContext(wrapped, depth, origin, partial);
+		throw wrapped;
 	}
 
 	// `params` are always attached to pageData for client-side router consumption.
 	// When pageData is skipped, the client merges its cached pageData with current
 	// route params separately, so we keep the `null` sentinel here.
-	const pageOut = pageData === null ? null : { ...pageData, params };
-	return { pageData: pageOut, layoutData, csr, ssr, pageDeps, layoutDeps, loaderHeaders };
+	const pageOut = page.data === null ? null : { ...page.data, params };
+	return {
+		pageData: pageOut,
+		layoutData,
+		csr: page.csr,
+		ssr: page.ssr,
+		pageDeps: page.deps,
+		layoutDeps,
+		loaderHeaders,
+	};
 }
 
 // ─── Metadata Loader ─────────────────────────────────────
@@ -646,12 +650,52 @@ export async function renderSSRStream(
 	// below must stay inside this try; the cache-write path hands the release
 	// off to its deferred cacheSet by nulling releaseMiss first.
 	try {
-		// ── Pre-stream phase: resolve metadata before committing to a 200 ──
-		// Errors here return a proper error response with correct status code.
+		// ── Pre-stream phase: metadata, loaders, module imports and plugin
+		// fragments all start together, and all settle before committing to a 200,
+		// so a Redirect/HttpError from any of them still gets a proper response.
+		// Only the page load() needs metadata.data; it waits on that alone.
+		const metadataP = loadMetadata(route, params, url, locals, cookies, req).then(
+			(value) => ({ ok: true as const, value }),
+			(err: unknown) => ({ ok: false as const, err }),
+		);
+		const dataP = Promise.all([
+			loadRouteData(
+				url,
+				locals,
+				req,
+				cookies,
+				// A failed metadata() hands load() null, as before — and when the
+				// failure ends the request, the result below is never read.
+				metadataP.then((m) => (m.ok ? (m.value?.data ?? null) : null)),
+				match,
+			),
+			Promise.all(route.layoutModules.map((l: () => Promise<any>) => l())),
+			// pageMod is already loaded when the cache flag was unknown.
+			pageMod ?? route.pageModule(),
+		]);
+		// Settled by the early returns below without being read.
+		dataP.catch(() => {});
+		const fragmentsP = metadataP.then((m) => {
+			const renderCtx: RenderContext = {
+				request: req,
+				url,
+				route: { pattern: route.pattern },
+				metadata: m.ok ? m.value : null,
+			};
+			return Promise.all([
+				pluginRenderFragments("head", renderCtx),
+				pluginRenderFragments("bodyEnd", renderCtx),
+			]);
+		});
+		fragmentsP.catch(() => {});
+
+		// Metadata errors return a proper error response with correct status code.
 		let metadata: Metadata | null = null;
-		try {
-			metadata = await loadMetadata(route, params, url, locals, cookies, req);
-		} catch (err) {
+		const meta = await metadataP;
+		if (meta.ok) {
+			metadata = meta.value;
+		} else {
+			const err = meta.err;
 			if (isRedirect(err)) {
 				// Not Response.redirect(): it rejects relative URLs on Workers.
 				return new Response(null, { status: err.status, headers: { Location: err.location } });
@@ -675,21 +719,12 @@ export async function renderSSRStream(
 			// Continue with null metadata — don't break the page for a metadata failure
 		}
 
-		// ── Pre-stream phase: run load() + module imports in parallel before committing to a 200 ──
-		// This ensures HttpError/Redirect from load() can return a proper response before any bytes are sent.
-		const metadataData = metadata?.data ?? null;
 		let data: Awaited<ReturnType<typeof loadRouteData>>;
 		let layoutMods: any[];
 
 		try {
-			// pageMod is already loaded when the cache flag was unknown; otherwise
-			// fold its import into this parallel block instead of a serial await.
 			let pm: any;
-			[data, layoutMods, pm] = await Promise.all([
-				loadRouteData(url, locals, req, cookies, metadataData, match),
-				Promise.all(route.layoutModules.map((l: () => Promise<any>) => l())),
-				pageMod ?? route.pageModule(),
-			]);
+			[data, layoutMods, pm] = await dataP;
 			pageMod = pm;
 		} catch (err) {
 			if (isRedirect(err))
@@ -741,16 +776,7 @@ export async function renderSSRStream(
 				nonce,
 			);
 
-		const renderCtx: RenderContext = {
-			request: req,
-			url,
-			route: { pattern: route.pattern },
-			metadata,
-		};
-		const [headExtras, bodyEndExtras] = await Promise.all([
-			pluginRenderFragments("head", renderCtx),
-			pluginRenderFragments("bodyEnd", renderCtx),
-		]);
+		const [headExtras, bodyEndExtras] = await fragmentsP;
 
 		// SSR always runs every loader, so coerce types from the optional sparse shape.
 		const layoutDataFull = (data.layoutData as Record<string, any>[]).map((d) => d ?? {});

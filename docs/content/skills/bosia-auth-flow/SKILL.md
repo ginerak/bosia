@@ -93,6 +93,8 @@ Mirror in `(public)/register/+page.server.ts`. Target must match R8's so the loo
 
 R10 — A login page implies a dashboard page. When you scaffold `(public)/login/+page.svelte`, also scaffold the post-login landing (typically `(private)/dashboard/+page.svelte`) plus `(private)/+layout.server.ts` gating the group (`if (!locals.user) throw redirect(303, "/login")`). Otherwise R8's redirect 404s and login looks broken. The dashboard can start minimal (heading + Log out form) but must exist.
 
+Page loaders under that group start at the same time as the layout loader, so the layout redirect decides the response but does not stop the page `load()` from running. Keep page loaders free of side effects, and read `locals.user` defensively there (`locals.user?.id`), or `await parent()` before touching it.
+
 ## Checklist gate
 
 P0:

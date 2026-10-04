@@ -67,6 +67,18 @@ export async function load({ params, parent }: LoadEvent) {
 
 Data flows top-down through **loaders**: root layout → group layout → page layout → page. Each loader sees its ancestors' returns via `parent()`, but nothing is merged into the component `data` prop automatically — re-return the keys you want (like `appName` above) for the page to read them. A page without a `load()` can't call `parent()`; add a minimal loader that returns `await parent()` to forward layout data.
 
+All of a route's loaders start at the same time. A loader waits for its ancestors only when it calls `await parent()`, so loaders that don't need parent data run side by side instead of one after another. Call `parent()` after starting your own independent work, not before, to keep that overlap:
+
+```ts
+export async function load({ params, parent }: LoadEvent) {
+	const postPromise = db.getPost(params.slug); // starts now
+	const { appName } = await parent(); // waits for the layouts
+	return { post: await postPromise, appName };
+}
+```
+
+Because a page's `load()` can start before a layout's `load()` finishes, don't rely on a layout loader to block access to a page. Check access in `hooks.server.ts` (see [Middleware Hooks](/guides/middleware-hooks)), or `await parent()` first in the page loader.
+
 ## Metadata
 
 Export a `metadata` function to set page title and meta tags:
