@@ -13,7 +13,7 @@ import type { RouteManifest } from "./types.ts";
 compileRoutes(apiRoutes);
 compileRoutes(serverRoutes);
 memoizeRouteImports(apiRoutes, serverRoutes);
-import { NO_FRAME_GUARD_HEADER, type Handle, type RequestEvent } from "./hooks.ts";
+import { NO_FRAME_GUARD_HEADER, type Handle, type Metadata, type RequestEvent } from "./hooks.ts";
 import { HttpError, Redirect, ActionFailure, isHttpError, isRedirect } from "./errors.ts";
 import { CookieJar } from "./cookies.ts";
 import { safePath } from "./safePath.ts";
@@ -252,6 +252,22 @@ function parseActionName(url: URL): string {
 const staticManifest = isDev ? null : buildStaticManifest(OUT_DIR);
 const prerenderManifest = isDev ? null : buildPrerenderManifest(OUT_DIR);
 
+/**
+ * Prod manifest hit for a GET/HEAD, or null. Same precedence as resolve():
+ * `/dist/` and `/__bosia/` are framework-owned, any other path yields to a
+ * `+server.ts` route that matches it.
+ */
+async function serveStaticEarly(request: Request, path: string): Promise<Response | null> {
+	if (!staticManifest || !isStaticPath(path)) return null;
+	if (request.method !== "GET" && request.method !== "HEAD") return null;
+	if (!path.startsWith("/dist/") && !path.startsWith("/__bosia/")) {
+		const api = resolveApiMatch(apiRoutes, path);
+		if (api instanceof Promise ? await api : api) return null;
+	}
+	const hit = lookupStatic(staticManifest, path);
+	return hit ? serveStatic(hit, request) : null;
+}
+
 async function resolve(event: RequestEvent): Promise<Response> {
 	const { request, url, locals, cookies } = event;
 	const path = url.pathname;
@@ -301,42 +317,41 @@ async function resolve(event: RequestEvent): Promise<Response> {
 				}
 			}
 			const runLoad = async () => {
-				const data = await loadRouteData(
-					routeUrl,
-					locals,
-					request,
-					cookies,
-					null,
-					pageMatch,
-					mask,
-					parentSnapshots,
-				);
-
-				let metadata = null;
-				if (pageMatch) {
-					try {
-						const meta = await loadMetadata(
+				// metadata() runs alongside the loaders. Failures stay non-fatal here, as
+				// before; the page load gets metadata.data, as it does on SSR.
+				const metaP: Promise<Metadata | null> = pageMatch
+					? loadMetadata(
 							pageMatch.route,
 							pageMatch.params,
 							routeUrl,
 							locals,
 							cookies,
 							request,
-						);
-						// Explicit whitelist, not a spread: `metadata.data` feeds load() on the
-						// server and may hold secrets — it must not reach the client.
-						if (meta)
-							metadata = {
-								title: meta.title,
-								description: meta.description,
-								meta: meta.meta,
-								link: meta.link,
-								lang: meta.lang,
-							};
-					} catch {
-						/* non-fatal */
-					}
-				}
+						).catch(() => null)
+					: Promise.resolve(null);
+				const data = await loadRouteData(
+					routeUrl,
+					locals,
+					request,
+					cookies,
+					metaP.then((m) => m?.data ?? null),
+					pageMatch,
+					mask,
+					parentSnapshots,
+				);
+
+				const meta = await metaP;
+				// Explicit whitelist, not a spread: `metadata.data` feeds load() on the
+				// server and may hold secrets — it must not reach the client.
+				const metadata = meta
+					? {
+							title: meta.title,
+							description: meta.description,
+							meta: meta.meta,
+							link: meta.link,
+							lang: meta.lang,
+						}
+					: null;
 
 				return { data, metadata, cookiesAccessed: (cookies as CookieJar).accessed };
 			};
@@ -1000,6 +1015,16 @@ async function handleRequest(request: Request, url: URL): Promise<Response> {
 			url.protocol === "https:";
 		cookieJar = new CookieJar(request.headers.get("cookie") ?? "", isHttps);
 		nonce = CSP_ENABLED ? generateNonce() : "";
+
+		// Built files and `public/` are answered before the hooks, as SvelteKit's
+		// adapters do: a session-lookup hook would otherwise cost one DB query per
+		// JS chunk. Only manifest hits skip them — a miss, a prerendered page and
+		// every route still go through `handle`.
+		const early = await serveStaticEarly(request, url.pathname);
+		if (early) {
+			decorateHeaders(early.headers, request, nonce, cookieJar);
+			return early;
+		}
 
 		// Decode the data endpoint before the hooks, not inside resolve(): a guard
 		// runs *before* `await resolve(event)`, so a rewrite in there reaches

@@ -67,6 +67,10 @@ export async function load({ params, parent }: LoadEvent) {
 
 Data mengalir dari atas ke bawah melalui **loader**: layout root → layout grup → layout halaman → halaman. Setiap loader melihat hasil induknya via `parent()`, tetapi tidak ada yang otomatis digabung ke prop `data` komponen — kembalikan ulang key yang Anda perlukan (seperti `appName` di atas) agar halaman bisa membacanya. Halaman tanpa `load()` tidak bisa memanggil `parent()`; tambahkan loader minimal yang mengembalikan `await parent()` untuk meneruskan data layout.
 
+Semua loader sebuah route **dimulai bersamaan**. `await parent()` yang mengurutkannya: ia menunggu layout di atasnya. Loader yang tidak pernah memanggil `parent()` tidak menunggu apa pun, jadi query independen di layout berbeda berjalan paralel. Panggil `parent()` setelah memulai pekerjaan sendiri, bukan sebelumnya, agar tetap tumpang tindih. Waktu menunggu di `parent()` tidak dihitung ke `LOAD_TIMEOUT`.
+
+> **Cek auth di loader layout tidak menjaga loader di bawahnya.** Jika layout root melempar `redirect()` untuk pengunjung tanpa sesi, loader anak yang tidak `await parent()` sudah terlanjur berjalan. Datanya dibuang, tetapi query-nya sudah dijalankan. Jaga route di [`handle`](/docs/guides/middleware-hooks) atau baca `locals`, atau `await parent()` sebelum melakukan apa pun yang tidak boleh dipicu tamu.
+
 ## Metadata
 
 Ekspor fungsi `metadata` untuk mengatur judul halaman dan meta tag:

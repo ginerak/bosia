@@ -12,6 +12,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - Every request does less work, so the server handles about 15–75% more visits per second (more for API routes and the data behind page navigation).
 - Plugin routes get the parsed request URL as `url`.
+- Layout and page loaders all start at once; `await parent()` waits for the layouts above. Pages whose layouts load data independently render sooner.
+- `metadata()` runs alongside the layout loaders instead of before them. The page's `load()` still waits for it.
+- In production, built files and `public/` files are served before your `handle` hook, so a session lookup in the hook no longer runs for every script and image.
+
+### Fixed
+
+- On client-side navigation, a page's `load()` now receives `metadata.data`, as it does on the first page load (it got `null`).
 
 ## [1.1.4] - 2026-10-04
 

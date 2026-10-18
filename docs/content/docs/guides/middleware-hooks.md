@@ -25,7 +25,7 @@ export const handle: Handle = async ({ event, resolve }) => {
 };
 ```
 
-The `handle` function intercepts **every request** — pages, API routes, and static assets.
+The `handle` function intercepts **every request** — pages, API routes, data requests and prerendered pages. In production, files from the build (`/dist/…`) and `public/` are served before `handle` runs, so a session lookup in a hook does not cost a query per JS chunk or image. A `+server.ts` route whose path looks like a file (e.g. `/feed.xml`) still runs `handle`.
 
 ## Handle Type
 

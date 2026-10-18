@@ -67,6 +67,10 @@ export async function load({ params, parent }: LoadEvent) {
 
 Data flows top-down through **loaders**: root layout → group layout → page layout → page. Each loader sees its ancestors' returns via `parent()`, but nothing is merged into the component `data` prop automatically — re-return the keys you want (like `appName` above) for the page to read them. A page without a `load()` can't call `parent()`; add a minimal loader that returns `await parent()` to forward layout data.
 
+All loaders of a route **start at the same time**. `await parent()` is what orders them: it waits for the layouts above. A loader that never calls `parent()` doesn't wait for anything, so independent queries in different layouts run in parallel. Call `parent()` after starting your own work, not before, to keep that overlap. Time spent waiting in `parent()` does not count toward `LOAD_TIMEOUT`.
+
+> **An auth check in a layout loader does not guard the loaders below it.** If the root layout throws `redirect()` for a visitor without a session, a child loader that doesn't `await parent()` has already started. Its data is discarded, but its queries ran. Guard routes in [`handle`](/docs/guides/middleware-hooks) or read `locals`, or `await parent()` before doing anything a guest must not trigger.
+
 ## Metadata
 
 Export a `metadata` function to set page title and meta tags:

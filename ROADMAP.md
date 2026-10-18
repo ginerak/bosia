@@ -13,6 +13,10 @@
 - [x] 🟠 Route importers (`() => import(…)`) went through the module loader on every call: ~22% of data-endpoint CPU. `core/routeImports.ts` memoizes them at startup; a rejected import is retried. Safe because dev restarts the server on every rebuild.
 - [x] 🟡 `BosiaApp` parsed `request.url`, then `frameworkHandler` parsed it again, and `query` was built for the catch-all that never reads it. One parse, passed as `ctx.url`; `query` is a lazy getter.
 - [x] ⚪ `dedupKey` built + sorted a `URLSearchParams` on every cache lookup; returns the path when there is no query. SSR encodes one string instead of three + concat.
+- [x] 🟠 Static files (`dist/`, `public/` manifest hits) answered before the user `handle`, with security headers; a `+server.ts` that matches the path still wins and runs the hook. Prerendered pages still go through hooks. Demo `/favicon.svg` 25k → 35k, hydrate chunk 16k → 21k rps (demo hook logs every request).
+- [x] 🟡 Layout + page loaders start together; `parent()` waits for the layers above. Shallowest failure still decides the error; deeper rejections are caught. `LOAD_TIMEOUT` pauses while a loader waits in `parent()`.
+- [x] 🟡 `metadata()` runs alongside the loaders (SSR, form re-render, data endpoint); only the page load awaits its data. A metadata redirect/HttpError still decides the response, and the page load does not run. Data endpoint now passes `metadata.data` to the page load (was `null`).
+- [x] Tests: `parallel-loaders.test.ts` (fixture app) — overlap, parent() data, error precedence, timeout pause, metadata concurrency + redirect, static-before-hooks. Each fails against the previous code.
 - [x] Before → after (rps): `/` 16.6k → 22.2k, `/about` 19.0k → 23.0k, `/blog` 16.8k → 21.2k, `/blog/[slug]` 15.8k → 19.5k, data endpoint 8.2k → 11.4k, hydrate chunk 13.9k → 16.4k, `/favicon.svg` 19.7k → 25.1k, `/api/hello` 12.6k → 22.0k, `/_health` 18.0k → 22.6k.
 - [ ] 🟢 Uncached SSR (~2.6k rps) spends ~1/3 in sync brotli. For 8–10KB pages `Bun.gzipSync` level 6 is faster _and_ smaller than br q3; br wins on large bodies. Pick by size if it matters.
 
@@ -43,10 +47,10 @@
 - [x] 🟠 Static assets uncompressed. Fixed 1.1.3: build writes `.br`/`.gz` for `dist/client` + `dist/prerendered`; `serveStatic` negotiates. Hydrate chunk 108KB → 31KB br.
 - [ ] ⚪ `public/` text files (svg/txt/json) still ship raw — the precompress pass skips the app's source dir. Precompress into `dist/static` if it matters.
 - [ ] ⚪ `compress()` is untestable for encoding under `bun test` (`isDev` read at import). Integration coverage is `apps/demo` curl + `ui.e2e.ts`; add a built-server encoding test.
-- [ ] 🟠 User `handle` hook runs for every static asset: static branches live inside `resolve()`. A session-lookup hook = one DB query per chunk. Serve manifest hits in `handleRequest` before hooks.
+- [x] 🟠 User `handle` hook runs for every static asset: static branches live inside `resolve()`. A session-lookup hook = one DB query per chunk. Serve manifest hits in `handleRequest` before hooks. Done (Unreleased).
 - [x] 🟡 Cache-write compression blocked the first byte (microtask). Fixed 1.1.3: `deferCacheWrite` uses `setImmediate` on Bun, microtask on Workers (no compression there). Order test added.
-- [ ] 🟡 Layout loaders run serially root→leaf even when none call `parent()`. Start all in parallel; make `parent()` await the earlier layers (SvelteKit's model).
-- [ ] 🟡 `metadata()` adds a serial step: before loaders on SSR (needed only if it returns `data`), after loaders on the data endpoint (`data` unused there). Also check: page `load` gets `metadata: null` on client nav.
+- [x] 🟡 Layout loaders run serially root→leaf even when none call `parent()`. Start all in parallel; make `parent()` await the earlier layers (SvelteKit's model). Done (Unreleased).
+- [x] 🟡 `metadata()` adds a serial step: before loaders on SSR (needed only if it returns `data`), after loaders on the data endpoint (`data` unused there). Also check: page `load` gets `metadata: null` on client nav. Done (Unreleased).
 - [ ] ⚪ `public/` files ship with no Cache-Control (heuristic caching). Prerendered HTML `max-age=3600` can outlive a deploy and point at deleted hashed chunks.
 
 ---

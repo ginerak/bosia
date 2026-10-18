@@ -25,7 +25,7 @@ export const handle: Handle = async ({ event, resolve }) => {
 };
 ```
 
-Fungsi `handle` menginterspsi **setiap request** — halaman, API route, dan aset statis.
+Fungsi `handle` menginterspsi **setiap request** — halaman, API route, request data, dan halaman prerender. Di production, file hasil build (`/dist/…`) dan `public/` dilayani sebelum `handle` berjalan, jadi pencarian sesi di hook tidak memakan satu query per chunk JS atau gambar. Route `+server.ts` yang path-nya mirip file (mis. `/feed.xml`) tetap menjalankan `handle`.
 
 ## Tipe Handle
 

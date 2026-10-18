@@ -27,7 +27,7 @@ bosia:
 
 # bosia-hooks
 
-`src/hooks.server.ts` runs on every request. The ONLY correct signature is `{ event, resolve }` — NOT `{ request, cookies }`:
+`src/hooks.server.ts` runs on every request except, in production, built files (`/dist/…`) and `public/` files, which are served before it. The ONLY correct signature is `{ event, resolve }` — NOT `{ request, cookies }`:
 
 ```ts
 import { sequence, redirect, error, fail, type Handle } from "bosia";

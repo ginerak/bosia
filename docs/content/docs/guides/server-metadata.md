@@ -3,7 +3,7 @@ title: Server Metadata
 description: Set page titles, meta tags, Open Graph, and lang attributes with the metadata() function.
 ---
 
-The `metadata()` function lets you define SEO and head tags for each page, running on the server before `load()`.
+The `metadata()` function lets you define SEO and head tags for each page, running on the server alongside the layout loaders. The page's `load()` waits for it and receives its `data` as `metadata`.
 
 ## Basic Usage
 
