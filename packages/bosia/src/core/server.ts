@@ -2,6 +2,7 @@ import { BosiaApp } from "./backend.ts";
 
 import { findMatch, compileRoutes, canonicalPathname } from "./matcher.ts";
 import { resolveApiMatch } from "./apiResolver.ts";
+import { memoizeRouteImports } from "./routeImports.ts";
 import { apiRoutes, serverRoutes } from "bosia:routes";
 import { loadPlugins } from "./config.ts";
 import { readArtifact } from "./artifacts.ts";
@@ -11,6 +12,7 @@ import type { RouteManifest } from "./types.ts";
 // Pre-compile route patterns into RegExp at startup (shared by renderer.ts via module reference)
 compileRoutes(apiRoutes);
 compileRoutes(serverRoutes);
+memoizeRouteImports(apiRoutes, serverRoutes);
 import { NO_FRAME_GUARD_HEADER, type Handle, type RequestEvent } from "./hooks.ts";
 import { HttpError, Redirect, ActionFailure, isHttpError, isRedirect } from "./errors.ts";
 import { CookieJar } from "./cookies.ts";
@@ -20,7 +22,14 @@ import type { CsrfConfig } from "./csrf.ts";
 import { applyCorsVary, getCorsHeaders, handlePreflight } from "./cors.ts";
 import type { CorsConfig } from "./cors.ts";
 import { buildCspHeader, CSP_DIRECTIVES_TEMPLATE, CSP_ENABLED, generateNonce } from "./csp.ts";
-import { isDev, compress, isStaticPath, distManifest, PRECOMPRESSED } from "./html.ts";
+import {
+	isDev,
+	compress,
+	compressionOn,
+	isStaticPath,
+	distManifest,
+	PRECOMPRESSED,
+} from "./html.ts";
 import { dev500WithPlugins } from "./dev-500.ts";
 import { OUT_DIR } from "./paths.ts";
 import { stripBase, withBase } from "./basePath.ts";
@@ -880,6 +889,42 @@ if (_xfoDisabled) {
 	console.log("🪟  X-Frame-Options disabled (DISABLE_X_FRAME_OPTIONS=true)");
 }
 
+const SECURITY_HEADER_ENTRIES = Object.entries(SECURITY_HEADERS);
+
+/** Security, CSP, CORS and Set-Cookie headers every framework response carries.
+ *  Throws on immutable headers; the caller then rebuilds the response. */
+function decorateHeaders(
+	headers: Headers,
+	request: Request,
+	nonce: string,
+	cookieJar: CookieJar,
+): void {
+	// A handle can mark a response (e.g. a proxied embeddable preview) to opt
+	// out of the frame guard. Strip the internal marker so it never ships, and
+	// skip only X-Frame-Options for that response — other security headers stay.
+	const skipFrameGuard = headers.has(NO_FRAME_GUARD_HEADER);
+	if (skipFrameGuard) headers.delete(NO_FRAME_GUARD_HEADER);
+	for (const [k, v] of SECURITY_HEADER_ENTRIES) {
+		if (skipFrameGuard && k === "X-Frame-Options") continue;
+		headers.set(k, v);
+	}
+	const cspHeader = buildCspHeader(nonce);
+	if (cspHeader) headers.set("Content-Security-Policy", cspHeader);
+	// Apply CORS headers for allowed origins. `Vary: Origin` is set whenever
+	// CORS is configured — even on responses to non-allowed origins — so
+	// downstream caches (CDNs, browser HTTP cache) key on the Origin header
+	// instead of serving an Access-Control-Allow-Origin response across origins.
+	if (CORS_CONFIG) {
+		applyCorsVary(headers);
+		const corsHeaders = getCorsHeaders(request, CORS_CONFIG);
+		if (corsHeaders) {
+			for (const [k, v] of Object.entries(corsHeaders)) headers.set(k, v);
+		}
+	}
+	// Apply any Set-Cookie headers accumulated during the request
+	for (const cookie of cookieJar.outgoing) headers.append("Set-Cookie", cookie);
+}
+
 async function handleRequest(request: Request, url: URL): Promise<Response> {
 	// Behind a trusted proxy the inbound `Host`/scheme is the proxy's inner hop
 	// (e.g. `localhost:PORT` over plain HTTP), so `url` built from `request.url`
@@ -1000,40 +1045,34 @@ async function handleRequest(request: Request, url: URL): Promise<Response> {
 			}
 		}
 
-		const headers = new Headers(response.headers);
-		// A handle can mark a response (e.g. a proxied embeddable preview) to opt
-		// out of the frame guard. Strip the internal marker so it never ships, and
-		// skip only X-Frame-Options for that response — other security headers stay.
-		const skipFrameGuard = headers.has(NO_FRAME_GUARD_HEADER);
-		headers.delete(NO_FRAME_GUARD_HEADER);
-		for (const [k, v] of Object.entries(SECURITY_HEADERS)) {
-			if (skipFrameGuard && k === "X-Frame-Options") continue;
-			headers.set(k, v);
-		}
-		const cspHeader = buildCspHeader(nonce);
-		if (cspHeader) headers.set("Content-Security-Policy", cspHeader);
-		// Apply CORS headers for allowed origins. `Vary: Origin` is set whenever
-		// CORS is configured — even on responses to non-allowed origins — so
-		// downstream caches (CDNs, browser HTTP cache) key on the Origin header
-		// instead of serving an Access-Control-Allow-Origin response across origins.
-		if (CORS_CONFIG) {
-			applyCorsVary(headers);
-			const corsHeaders = getCorsHeaders(request, CORS_CONFIG);
-			if (corsHeaders) {
-				for (const [k, v] of Object.entries(corsHeaders)) headers.set(k, v);
+		// Decorate the response in place: copying it into a new Response costs a
+		// header copy plus a body re-wrap on every request. Rebuilt only when the
+		// headers are immutable (a Workers `fetch()` result passed through), or on
+		// Workers (no runtime compression) when the body is already encoded: a
+		// hook's own pre-compressed Response lacks `encodeBody: "manual"` and
+		// Workers would compress it again.
+		let rebuild = !compressionOn && response.headers.has("content-encoding");
+		if (!rebuild) {
+			try {
+				decorateHeaders(response.headers, request, nonce, cookieJar);
+			} catch {
+				rebuild = true;
 			}
 		}
-		// Apply any Set-Cookie headers accumulated during the request
-		for (const cookie of cookieJar.outgoing) headers.append("Set-Cookie", cookie);
-		return new Response(response.body, {
-			// A Content-Encoding here means the body is already compressed (cache
-			// hit, compress()); rebuilding drops that flag and Workers would
-			// compress it again.
-			...(headers.has("content-encoding") ? PRECOMPRESSED : {}),
-			status: response.status,
-			statusText: response.statusText,
-			headers,
-		});
+		if (rebuild) {
+			const headers = new Headers(response.headers);
+			decorateHeaders(headers, request, nonce, cookieJar);
+			response = new Response(response.body, {
+				// A Content-Encoding here means the body is already compressed (cache
+				// hit, compress()); rebuilding drops that flag and Workers would
+				// compress it again.
+				...(headers.has("content-encoding") ? PRECOMPRESSED : {}),
+				status: response.status,
+				statusText: response.statusText,
+				headers,
+			});
+		}
+		return response;
 	} catch (err) {
 		// `throw redirect()` / `throw error()` from a hook lands here — the same
 		// escape hatch loaders have always had. Without these branches both fall
@@ -1229,8 +1268,9 @@ export type CreateAppOptions = {
 	handle?: Handle | null;
 };
 
-const frameworkHandler = ({ request }: { request: Request }) =>
-	handleRequest(request, new URL(request.url));
+// Reuses the URL BosiaApp already parsed; nothing reads it after the handler.
+const frameworkHandler = ({ request, url }: { request: Request; url: URL }) =>
+	handleRequest(request, url);
 
 /** Build the backend app: plugins, the framework's catch-all routes, error handling. */
 export async function createApp(options: CreateAppOptions = {}): Promise<BosiaApp> {

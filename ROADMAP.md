@@ -5,6 +5,17 @@
 
 ---
 
+## Unreleased — less work per request
+
+> Profiled the demo under load (4 vCPU, oha, 50 conns, demo hooks on). A bare `Bun.serve` here does ~75k rps; cached Bosia pages did ~16k. Self-time went to rebuilding every response, re-running `import()` per request, and parsing the URL twice.
+
+- [x] 🟠 `handleRequest` copied headers + re-wrapped the body (`new Response(response.body)`) on every response. Now decorates `response.headers` in place; only immutable headers (a Workers `fetch()` result) fall back to the rebuild. Test simulates the immutable case.
+- [x] 🟠 Route importers (`() => import(…)`) went through the module loader on every call: ~22% of data-endpoint CPU. `core/routeImports.ts` memoizes them at startup; a rejected import is retried. Safe because dev restarts the server on every rebuild.
+- [x] 🟡 `BosiaApp` parsed `request.url`, then `frameworkHandler` parsed it again, and `query` was built for the catch-all that never reads it. One parse, passed as `ctx.url`; `query` is a lazy getter.
+- [x] ⚪ `dedupKey` built + sorted a `URLSearchParams` on every cache lookup; returns the path when there is no query. SSR encodes one string instead of three + concat.
+- [x] Before → after (rps): `/` 16.6k → 22.2k, `/about` 19.0k → 23.0k, `/blog` 16.8k → 21.2k, `/blog/[slug]` 15.8k → 19.5k, data endpoint 8.2k → 11.4k, hydrate chunk 13.9k → 16.4k, `/favicon.svg` 19.7k → 25.1k, `/api/hello` 12.6k → 22.0k, `/_health` 18.0k → 22.6k.
+- [ ] 🟢 Uncached SSR (~2.6k rps) spends ~1/3 in sync brotli. For 8–10KB pages `Bun.gzipSync` level 6 is faster _and_ smaller than br q3; br wins on large bodies. Pick by size if it matters.
+
 ## bosia 1.1.4 (2026-10-04) — static files from memory
 
 > Load test (M1, oha, 50 conns): cached SSR ~46k rps, but `/about` (prerendered) ~14k and hashed chunks ~13k. `serveStatic` read `Bun.file` from disk on every request.

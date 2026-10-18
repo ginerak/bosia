@@ -14,6 +14,8 @@ const inflight = new Map<string, Promise<unknown>>();
 export function dedupKey(url: URL): string {
 	let path = url.pathname;
 	if (path.length > 1 && path.endsWith("/")) path = path.slice(0, -1);
+	// No query: skip building and sorting a URLSearchParams on every cache lookup.
+	if (url.search === "") return path;
 	const sorted = new URLSearchParams([...url.searchParams.entries()].sort());
 	const search = sorted.toString();
 	return search ? `${path}?${search}` : path;

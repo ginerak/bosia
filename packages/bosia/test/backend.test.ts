@@ -133,3 +133,9 @@ test("options() registers a route, not the constructor config", async () => {
 	const app = new BosiaApp({ serve: { idleTimeout: 5 } }).options("*", () => "preflight");
 	expect(await (await app.fetch(req("/", { method: "OPTIONS" }))).text()).toBe("preflight");
 });
+
+test("handlers get the parsed url and a lazy query", async () => {
+	const app = new BosiaApp().get("/q", ({ url, query }) => ({ path: url.pathname, query }));
+	const res = await app.fetch(req("/q?a=1&b=2"));
+	expect(await res.json()).toEqual({ path: "/q", query: { a: "1", b: "2" } });
+});

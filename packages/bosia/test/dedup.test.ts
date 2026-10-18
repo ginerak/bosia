@@ -6,6 +6,10 @@ describe("dedupKey()", () => {
 		expect(dedupKey(new URL("https://x.test/blog"))).toBe("/blog");
 	});
 
+	test("a bare ? is the same key as no query", () => {
+		expect(dedupKey(new URL("https://x.test/blog?"))).toBe("/blog");
+	});
+
 	test("normalizes trailing slash on non-root paths", () => {
 		expect(dedupKey(new URL("https://x.test/blog/"))).toBe("/blog");
 	});

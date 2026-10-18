@@ -79,6 +79,17 @@ beforeAll(async () => {
 			`\tif (mode === "fabricate") {\n` +
 			`\t\treturn resolve({ ...event, request: new Request(event.request.url) });\n` +
 			`\t}\n\n` +
+			// Stands in for a Workers fetch() result: its headers refuse mutation.
+			`\tif (mode === "immutable") {\n` +
+			`\t\tconst res = new Response("frozen", { status: 202, headers: { "x-own": "1" } });\n` +
+			`\t\tconst headers = new Headers(res.headers);\n` +
+			`\t\tfor (const m of ["set", "append", "delete"]) {\n` +
+			`\t\t\t(headers as any)[m] = () => { throw new TypeError("immutable"); };\n` +
+			`\t\t}\n` +
+			`\t\tObject.defineProperty(res, "headers", { value: headers });\n` +
+			`\t\tevent.cookies.set("seen", "1");\n` +
+			`\t\treturn res;\n` +
+			`\t}\n\n` +
 			`\tif (mode === "throw-redirect") throw redirect(303, "/login");\n\n` +
 			`\tif (mode === "throw-redirect-cookie") {\n` +
 			`\t\tevent.cookies.delete("sid", { path: "/" });\n` +
@@ -246,5 +257,24 @@ describe("the data endpoint's own contract", () => {
 		const res = await fetch(dataUrl("/admin"), { headers: { "x-guard": "fabricate" } });
 		expect(res.status).toBe(200);
 		expect(res.headers.get("content-type")).toContain("text/html");
+	});
+});
+
+describe("framework headers on a hook's response", () => {
+	test("a response with immutable headers is rebuilt, not dropped", async () => {
+		const res = await fetch(`${origin}/`, { headers: { "x-guard": "immutable" } });
+		expect(res.status).toBe(202);
+		expect(await res.text()).toBe("frozen");
+		expect(res.headers.get("x-own")).toBe("1");
+		expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+		expect(res.headers.get("set-cookie")).toContain("seen=1");
+	});
+
+	test("a mutable response is decorated in place", async () => {
+		const res = await fetch(`${origin}/`);
+		expect(res.status).toBe(200);
+		expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+		expect(res.headers.get("x-frame-options")).toBe("SAMEORIGIN");
+		expect(await res.text()).toContain("Beranda");
 	});
 });
