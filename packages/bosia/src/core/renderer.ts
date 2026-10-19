@@ -467,9 +467,12 @@ export async function loadRouteData(
 
 	// Every loader starts at once; parent() is what orders them. A layer that
 	// never calls parent() no longer waits for the layers above it to finish.
-	// `contrib` is what a layer adds to the parent() chain below it.
+	// `contrib` is what a layer adds to the parent() chain below it. Tasks never
+	// reject — a failure resolves to `{ err }` — so a deeper failure that is
+	// never awaited (a shallower one is reported first) is not an unhandled
+	// rejection, without a `.catch()` per task.
 	type Layer = { data: Record<string, any> | null; deps: LoaderDeps | null; contrib: object };
-	const layers: Promise<Layer>[] = [];
+	const layers: Promise<Layer | Failed>[] = [];
 	const parentCache = new Map<number, Promise<Record<string, any>>>();
 	// Merged data of layers [0, n). One object per n, so a loader cannot mutate
 	// what another sees; rejects with the first failing layer's error.
@@ -478,7 +481,11 @@ export async function loadRouteData(
 		if (!p) {
 			p = (async () => {
 				let acc: Record<string, any> = {};
-				for (let j = 0; j < n; j++) acc = { ...acc, ...(await layers[j]!).contrib };
+				for (let j = 0; j < n; j++) {
+					const layer = await layers[j]!;
+					if (layer instanceof Failed) throw layer.err;
+					acc = { ...acc, ...layer.contrib };
+				}
 				return acc;
 			})();
 			p.catch(noop);
@@ -488,97 +495,103 @@ export async function loadRouteData(
 	};
 
 	route.layoutServers.forEach((ls, i) => {
-		const task = (async (): Promise<Layer> => {
-			if (mask && mask.layouts[ls.depth] === false) {
-				// Skipped layers contribute their client-cached data (forwarded as
-				// parentSnapshots) to the parent chain, so downstream loaders that DO
-				// re-run see real parent() data. Falls back to {} when no snapshot was
-				// sent. Perf hint only — never authoritative for authz (use locals).
-				return { data: null, deps: null, contrib: parentSnapshots?.[ls.depth] ?? {} };
-			}
-			const mod = await ls.loader();
-			if (typeof mod.load !== "function" || warmingUp) {
-				return { data: {}, deps: emptyDeps(), contrib: {} };
-			}
-			const deps = emptyDeps();
-			const result =
-				(await runLoader(LOAD_TIMEOUT, `layout load (depth=${ls.depth}, ${url.pathname})`, (gate) =>
-					mod.load({
-						params: trackedParams(params, deps),
-						url: trackedUrl(url, deps),
-						locals,
-						cookies: trackedCookies(cookies, deps),
-						parent: () => gate(parentOf(i)),
-						fetch: trackedFetch(fetch, origin, deps),
-						metadata: null,
-						depends: makeDepends(deps),
-						platform: getPlatform(),
-						setHeaders,
-					}),
-				)) ?? {};
-			return { data: result, deps, contrib: result };
-		})();
-		// Reported in depth order below; a deeper failure behind a shallower one
-		// is never awaited there, and must not surface as an unhandled rejection.
-		task.catch(noop);
-		layers.push(task);
+		layers.push(
+			(async (): Promise<Layer | Failed> => {
+				try {
+					if (mask && mask.layouts[ls.depth] === false) {
+						// Skipped layers contribute their client-cached data (forwarded as
+						// parentSnapshots) to the parent chain, so downstream loaders that DO
+						// re-run see real parent() data. Falls back to {} when no snapshot was
+						// sent. Perf hint only — never authoritative for authz (use locals).
+						return { data: null, deps: null, contrib: parentSnapshots?.[ls.depth] ?? {} };
+					}
+					const mod = await ls.loader();
+					if (typeof mod.load !== "function" || warmingUp) {
+						return { data: {}, deps: emptyDeps(), contrib: {} };
+					}
+					const deps = emptyDeps();
+					const result =
+						(await runLoader(
+							LOAD_TIMEOUT,
+							`layout load (depth=${ls.depth}, ${url.pathname})`,
+							(gate) =>
+								mod.load({
+									params: trackedParams(params, deps),
+									url: trackedUrl(url, deps),
+									locals,
+									cookies: trackedCookies(cookies, deps),
+									parent: () => gate(parentOf(i)),
+									fetch: trackedFetch(fetch, origin, deps),
+									metadata: null,
+									depends: makeDepends(deps),
+									platform: getPlatform(),
+									setHeaders,
+								}),
+						)) ?? {};
+					return { data: result, deps, contrib: result };
+				} catch (err) {
+					return new Failed(err);
+				}
+			})(),
+		);
 	});
 
 	let csr = true;
 	let ssr = true;
 	const skipPage = mask && mask.page === false;
-	const pageTask = (async (): Promise<{
-		data: Record<string, any> | null;
-		deps: LoaderDeps | null;
-	}> => {
-		if (!route.pageServer) return { data: {}, deps: emptyDeps() };
-		const mod = await route.pageServer();
-		if (mod.csr === false) csr = false;
-		if (mod.ssr === false) ssr = false;
-		if (skipPage) return { data: null, deps: null };
-		if (typeof mod.load !== "function" || warmingUp) return { data: {}, deps: emptyDeps() };
-		// metadata() runs alongside the layouts; only the page load consumes it.
-		const metadata = await metadataData;
-		const deps = emptyDeps();
-		const data =
-			(await runLoader(LOAD_TIMEOUT, `page load (${url.pathname})`, (gate) =>
-				mod.load({
-					params: trackedParams(params, deps),
-					url: trackedUrl(url, deps),
-					locals,
-					cookies: trackedCookies(cookies, deps),
-					parent: () => gate(parentOf(layers.length)),
-					fetch: trackedFetch(fetch, origin, deps),
-					metadata,
-					depends: makeDepends(deps),
-					platform: getPlatform(),
-					setHeaders,
-				}),
-			)) ?? {};
-		return { data, deps };
-	})();
-	pageTask.catch(noop);
+	type Page = { data: Record<string, any> | null; deps: LoaderDeps | null };
+	const pageServer = route.pageServer;
+	// No +page.server.ts: nothing to run, so no task either.
+	const pageTask: Page | Promise<Page | Failed> = !pageServer
+		? { data: {}, deps: emptyDeps() }
+		: (async (): Promise<Page | Failed> => {
+				try {
+					const mod = await pageServer();
+					if (mod.csr === false) csr = false;
+					if (mod.ssr === false) ssr = false;
+					if (skipPage) return { data: null, deps: null };
+					if (typeof mod.load !== "function" || warmingUp) {
+						return { data: {}, deps: emptyDeps() };
+					}
+					// metadata() runs alongside the layouts; only the page load consumes it.
+					const metadata = metadataData instanceof Promise ? await metadataData : metadataData;
+					const deps = emptyDeps();
+					const data =
+						(await runLoader(LOAD_TIMEOUT, `page load (${url.pathname})`, (gate) =>
+							mod.load({
+								params: trackedParams(params, deps),
+								url: trackedUrl(url, deps),
+								locals,
+								cookies: trackedCookies(cookies, deps),
+								parent: () => gate(parentOf(layers.length)),
+								fetch: trackedFetch(fetch, origin, deps),
+								metadata,
+								depends: makeDepends(deps),
+								platform: getPlatform(),
+								setHeaders,
+							}),
+						)) ?? {};
+					return { data, deps };
+				} catch (err) {
+					return new Failed(err);
+				}
+			})();
 
 	// Collect root → leaf, so the shallowest failure wins — the one a serial run
 	// would have hit first.
 	for (let i = 0; i < layers.length; i++) {
 		const depth = route.layoutServers[i]!.depth;
-		try {
-			const layer = await layers[i]!;
-			layoutData[depth] = layer.data;
-			layoutDeps[depth] = layer.deps;
-		} catch (err) {
-			throw loaderFailure(err, depth, "layout", layoutData);
-		}
+		const layer = await layers[i]!;
+		if (layer instanceof Failed) throw loaderFailure(layer.err, depth, "layout", layoutData);
+		layoutData[depth] = layer.data;
+		layoutDeps[depth] = layer.deps;
 	}
 
-	let pageData: Record<string, any> | null;
-	let pageDeps: LoaderDeps | null;
-	try {
-		({ data: pageData, deps: pageDeps } = await pageTask);
-	} catch (err) {
-		throw loaderFailure(err, route.layoutModules.length, "page", layoutData);
+	const page = pageTask instanceof Promise ? await pageTask : pageTask;
+	if (page instanceof Failed) {
+		throw loaderFailure(page.err, route.layoutModules.length, "page", layoutData);
 	}
+	const { data: pageData, deps: pageDeps } = page;
 
 	// `params` are always attached to pageData for client-side router consumption.
 	// When pageData is skipped, the client merges its cached pageData with current
@@ -588,6 +601,11 @@ export async function loadRouteData(
 }
 
 function noop() {}
+
+/** A loader task's failure, resolved rather than rejected. */
+class Failed {
+	constructor(readonly err: unknown) {}
+}
 
 /** The error a failed loader at `depth` throws: redirects pass through,
  *  HttpErrors get their boundary stamped, anything else becomes a stamped 500. */

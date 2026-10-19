@@ -253,18 +253,26 @@ const staticManifest = isDev ? null : buildStaticManifest(OUT_DIR);
 const prerenderManifest = isDev ? null : buildPrerenderManifest(OUT_DIR);
 
 /**
- * Prod manifest hit for a GET/HEAD, or null. Same precedence as resolve():
+ * Prod manifest hit for a GET/HEAD, or null. The data endpoint is never a file. Same precedence as resolve():
  * `/dist/` and `/__bosia/` are framework-owned, any other path yields to a
  * `+server.ts` route that matches it.
  */
-async function serveStaticEarly(request: Request, path: string): Promise<Response | null> {
-	if (!staticManifest || !isStaticPath(path)) return null;
+function serveStaticEarly(
+	request: Request,
+	path: string,
+): Response | null | Promise<Response | null> {
+	if (!staticManifest || !isStaticPath(path) || path.startsWith("/__bosia/data/")) return null;
 	if (request.method !== "GET" && request.method !== "HEAD") return null;
-	if (!path.startsWith("/dist/") && !path.startsWith("/__bosia/")) {
-		const api = resolveApiMatch(apiRoutes, path);
-		if (api instanceof Promise ? await api : api) return null;
-	}
-	const hit = lookupStatic(staticManifest, path);
+	if (path.startsWith("/dist/") || path.startsWith("/__bosia/"))
+		return serveManifestHit(request, path);
+	const api = resolveApiMatch(apiRoutes, path);
+	// Only a `.json` path resolves its route asynchronously (see apiResolver.ts).
+	if (api instanceof Promise) return api.then((m) => (m ? null : serveManifestHit(request, path)));
+	return api ? null : serveManifestHit(request, path);
+}
+
+function serveManifestHit(request: Request, path: string): Response | null {
+	const hit = lookupStatic(staticManifest!, path);
 	return hit ? serveStatic(hit, request) : null;
 }
 
@@ -319,7 +327,8 @@ async function resolve(event: RequestEvent): Promise<Response> {
 			const runLoad = async () => {
 				// metadata() runs alongside the loaders. Failures stay non-fatal here, as
 				// before; the page load gets metadata.data, as it does on SSR.
-				const metaP: Promise<Metadata | null> = pageMatch
+				// Only a +page.server.ts can export metadata(); skip the promise chain otherwise.
+				const metaP: Promise<Metadata | null> | null = pageMatch?.route.pageServer
 					? loadMetadata(
 							pageMatch.route,
 							pageMatch.params,
@@ -328,19 +337,19 @@ async function resolve(event: RequestEvent): Promise<Response> {
 							cookies,
 							request,
 						).catch(() => null)
-					: Promise.resolve(null);
+					: null;
 				const data = await loadRouteData(
 					routeUrl,
 					locals,
 					request,
 					cookies,
-					metaP.then((m) => m?.data ?? null),
+					metaP ? metaP.then((m) => m?.data ?? null) : null,
 					pageMatch,
 					mask,
 					parentSnapshots,
 				);
 
-				const meta = await metaP;
+				const meta = metaP ? await metaP : null;
 				// Explicit whitelist, not a spread: `metadata.data` feeds load() on the
 				// server and may hold secrets — it must not reach the client.
 				const metadata = meta
@@ -1020,7 +1029,9 @@ async function handleRequest(request: Request, url: URL): Promise<Response> {
 		// adapters do: a session-lookup hook would otherwise cost one DB query per
 		// JS chunk. Only manifest hits skip them — a miss, a prerendered page and
 		// every route still go through `handle`.
-		const early = await serveStaticEarly(request, url.pathname);
+		// Sync for every request but a `.json` one — no await on the common path.
+		const maybeEarly = serveStaticEarly(request, url.pathname);
+		const early = maybeEarly instanceof Promise ? await maybeEarly : maybeEarly;
 		if (early) {
 			decorateHeaders(early.headers, request, nonce, cookieJar);
 			return early;
