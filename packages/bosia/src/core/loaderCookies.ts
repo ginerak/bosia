@@ -42,18 +42,17 @@ export class LoaderCookies {
 		return {
 			get: (name) => jar.get(name),
 			getAll: () => jar.getAll(),
-			set: (name, value, options) =>
-				buffer(
-					serialize
-						? serialize(name, value, options)
-						: () => jar.set(name, value, options && { ...options }),
-				),
-			delete: (name, options) =>
-				buffer(
-					serialize
-						? serialize(name, "", { ...options, maxAge: 0 })
-						: () => jar.delete(name, options && { ...options }),
-				),
+			set: (name, value, options) => {
+				if (serialize) return buffer(serialize(name, value, options));
+				// Copied now: the loader may change its options object after the call.
+				const opts = options && { ...options };
+				buffer(() => jar.set(name, value, opts));
+			},
+			delete: (name, options) => {
+				if (serialize) return buffer(serialize(name, "", { ...options, maxAge: 0 }));
+				const opts = options && { ...options };
+				buffer(() => jar.delete(name, opts));
+			},
 		};
 	}
 
