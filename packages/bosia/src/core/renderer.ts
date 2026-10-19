@@ -144,7 +144,9 @@ function parseTimeout(raw: string | undefined, fallback: number): number {
 const LOAD_TIMEOUT = parseTimeout(process.env.LOAD_TIMEOUT, 5000);
 const METADATA_TIMEOUT = parseTimeout(process.env.METADATA_TIMEOUT, 3000);
 
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+function withTimeout<T>(value: T | Promise<T>, ms: number, label: string): Promise<T> {
+	// A metadata() may be sync and return a plain object.
+	const promise = Promise.resolve(value);
 	if (ms <= 0) return promise;
 	let timer: Timer;
 	return Promise.race([
@@ -550,6 +552,9 @@ async function loadRouteData(
 
 	let csr = true;
 	let ssr = true;
+	// Set once a layer's failure decided the response; the page load, still
+	// waiting for metadata(), then never starts — serially it never would have.
+	let decided = false;
 	const skipPage = mask && mask.page === false;
 	type Page = { data: Record<string, any> | null; deps: LoaderDeps | null };
 	const pageServer = route.pageServer;
@@ -567,6 +572,7 @@ async function loadRouteData(
 					}
 					// metadata() runs alongside the layouts; only the page load consumes it.
 					const metadata = metadataData instanceof Promise ? await metadataData : metadataData;
+					if (decided) return { data: null, deps: null };
 					const deps = emptyDeps();
 					const data =
 						(await runLoader(LOAD_TIMEOUT, `page load (${url.pathname})`, (gate) =>
@@ -594,21 +600,29 @@ async function loadRouteData(
 	for (let i = 0; i < layers.length; i++) {
 		const depth = route.layoutServers[i]!.depth;
 		const layer = await layers[i]!;
-		const err = layer instanceof Failed ? layer.err : mergeHeaders(i);
-		if (err) {
+		// A Failed may hold a falsy value (`throw undefined`): test the wrapper, not the error.
+		const failure = layer instanceof Failed ? layer : wrapFailure(mergeHeaders(i));
+		if (failure) {
 			// Deeper loaders kept running, but serially they never would have:
 			// their cookies must not ride on this layer's redirect or error page.
 			loaderCookies.keepOnlyBelow(i + 1);
-			throw loaderFailure(err, depth, "layout", layoutData, loaderCookies);
+			decided = true;
+			throw loaderFailure(failure.err, depth, "layout", layoutData, loaderCookies);
 		}
 		layoutData[depth] = (layer as Layer).data;
 		layoutDeps[depth] = (layer as Layer).deps;
 	}
 
 	const page = pageTask instanceof Promise ? await pageTask : pageTask;
-	const pageErr = page instanceof Failed ? page.err : mergeHeaders(layers.length);
-	if (pageErr) {
-		throw loaderFailure(pageErr, route.layoutModules.length, "page", layoutData, loaderCookies);
+	const pageFailure = page instanceof Failed ? page : wrapFailure(mergeHeaders(layers.length));
+	if (pageFailure) {
+		throw loaderFailure(
+			pageFailure.err,
+			route.layoutModules.length,
+			"page",
+			layoutData,
+			loaderCookies,
+		);
 	}
 	const { data: pageData, deps: pageDeps } = page as Page;
 
@@ -644,6 +658,10 @@ function handled<T>(p: Promise<T>): Promise<T> {
 /** A loader task's failure, resolved rather than rejected. */
 class Failed {
 	constructor(readonly err: unknown) {}
+}
+
+function wrapFailure(err: Error | null): Failed | null {
+	return err ? new Failed(err) : null;
 }
 
 /** The error a failed loader at `depth` throws: redirects pass through,

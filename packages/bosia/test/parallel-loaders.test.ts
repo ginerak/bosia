@@ -27,6 +27,7 @@ beforeAll(async () => {
 	mkdirSync(join(routes, "count"), { recursive: true });
 	mkdirSync(join(routes, "feed.txt"), { recursive: true });
 	mkdirSync(join(routes, "shared"), { recursive: true });
+	mkdirSync(join(routes, "sync"), { recursive: true });
 	mkdirSync(join(tmpDir, "public"), { recursive: true });
 
 	writeFileSync(join(tmpDir, "tsconfig.json"), JSON.stringify({ compilerOptions: { paths: {} } }));
@@ -68,6 +69,7 @@ beforeAll(async () => {
 			`\tif (url.searchParams.has("order")) cookies.set("theme", "dark");\n` +
 			`\tif (url.searchParams.has("boom-root")) throw error(404, "root");\n` +
 			`\tif (url.searchParams.has("guest")) throw redirect(303, "/");\n` +
+			`\tif (url.searchParams.has("falsy")) throw undefined;\n` +
 			`\treturn { root: "r", rootStart };\n` +
 			`}\n`,
 	);
@@ -109,6 +111,7 @@ beforeAll(async () => {
 			// Instant under ?slow, so the page load's clock starts while the root
 			// layout is still running and parent() really waits.
 			`\tif (!url.searchParams.has("slow")) await Bun.sleep(${SLEEP});\n` +
+			`\tif (url.searchParams.has("meta-slow")) await Bun.sleep(${SLEEP * 2});\n` +
 			`\tif (url.searchParams.has("meta-redirect")) throw redirect(303, "/");\n` +
 			`\tif (url.searchParams.has("meta-404")) throw error(404, "no seo record");\n` +
 			`\treturn { title: "Par title", data: { fromMeta: "m", metaStart } };\n` +
@@ -136,6 +139,13 @@ beforeAll(async () => {
 			`\tcookies.set("who", url.searchParams.get("who") ?? "none");\n` +
 			`\treturn shared;\n` +
 			`}\n`,
+	);
+	// A metadata() that is not async.
+	writeFileSync(join(routes, "sync", "+page.svelte"), `<h1>Sync</h1>\n`);
+	writeFileSync(
+		join(routes, "sync", "+page.server.ts"),
+		`export const cache = false;\n` +
+			`export function metadata() {\n\treturn { title: "Sync title" };\n}\n`,
 	);
 	// A route that looks like a static file: must still win over public/ lookup.
 	writeFileSync(
@@ -347,14 +357,16 @@ describe("a reused Response without per-request headers", () => {
 });
 
 describe("review fixes, pass 4", () => {
-	test("a metadata() HttpError on client navigation always reports the root boundary", async () => {
+	test("a metadata() HttpError on client navigation always skips every nested boundary", async () => {
 		for (let i = 0; i < 5; i++) {
 			const res = await fetch(`${origin}/__bosia/data/par.json?meta-404`);
 			expect(res.status).toBe(404);
 			const body = await res.json();
 			expect(body.error).toMatchObject({ status: 404, message: "no seo record" });
-			expect(body.errorDepth).toBeNull();
-			expect(body.errorOrigin).toBeNull();
+			// No boundary catches a layout failure at depth 0: the client reloads and
+			// gets the global error page, as SSR renders it.
+			expect(body.errorDepth).toBe(0);
+			expect(body.errorOrigin).toBe("layout");
 		}
 	});
 });
@@ -367,5 +379,26 @@ describe("review fixes, pass 10", () => {
 		// Depth 1 is the inner layout: the one whose call threw when they ran in turn.
 		expect(body.errorDepth).toBe(1);
 		expect(body.errorOrigin).toBe("layout");
+	});
+
+	test("a loader that throws undefined still fails the request", async () => {
+		const res = await fetch(`${origin}/par?falsy`);
+		expect(res.status).toBe(500);
+	});
+
+	test("the page load does not start once a layout has decided the response", async () => {
+		const before = (await stats()).pageLoads;
+		const res = await fetch(`${origin}/par?guest&meta-slow`, { redirect: "manual" });
+		expect(res.status).toBe(303);
+		// metadata() settles after the redirect was decided; the page load must not follow it.
+		await Bun.sleep(SLEEP * 3);
+		expect((await stats()).pageLoads).toBe(before);
+	});
+
+	test("a metadata() that is not async still renders its title", async () => {
+		const res = await fetch(`${origin}/sync`);
+		expect(res.status).toBe(200);
+		const html = await res.text();
+		expect(html).toContain("Sync title");
 	});
 });

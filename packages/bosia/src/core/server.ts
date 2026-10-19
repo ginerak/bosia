@@ -366,7 +366,17 @@ async function resolve(event: RequestEvent): Promise<Response> {
 					parentSnapshots,
 				);
 				const outcome = await load.metadata;
-				if ("decided" in outcome) throw outcome.decided;
+				if ("decided" in outcome) {
+					const d = outcome.decided;
+					if (isRedirect(d)) throw d;
+					// SSR renders the global error page for it: no boundary catches a
+					// layout failure at depth 0, so the client reloads and gets that page
+					// too. A fresh error, as the user's may be shared between requests.
+					throw Object.assign(new HttpError(d.status, d.message), {
+						errorDepth: 0,
+						errorOrigin: "layout",
+					});
+				}
 				const metaResult = outcome.meta;
 				const [data] = await load.loaded();
 
