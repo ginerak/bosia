@@ -119,7 +119,7 @@ async function pluginRenderFragments(
 			if (fragment) out.push(fragment);
 		} catch (err) {
 			if (isDev) console.error(`Plugin "${p.name}" render.${hook} failed:`, err);
-			else console.error(`Plugin "${p.name}" render.${hook} failed:`, (err as Error).message);
+			else console.error(`Plugin "${p.name}" render.${hook} failed:`, (err as Error)?.message);
 			if (isDev) reportDevErrorFromCatch(err);
 		}
 	}
@@ -698,7 +698,7 @@ function loaderFailure(
 	const kind = origin === "layout" ? "Layout" : "Page";
 	loaderCookies.report(() => {
 		if (isDev) console.error(`${kind} server load error:`, err);
-		else console.error(`${kind} server load error:`, (err as Error).message ?? err);
+		else console.error(`${kind} server load error:`, (err as Error)?.message ?? err);
 		if (isDev) reportDevErrorFromCatch(err);
 	});
 	const wrapped = new HttpError(500, "Internal Server Error");
@@ -734,7 +734,7 @@ export async function loadMetadata(
 		// here made every caller's Redirect/HttpError branch dead code.
 		if (isRedirect(err) || isHttpError(err)) throw err;
 		if (isDev) console.error("Metadata load error:", err);
-		else console.error("Metadata load error:", (err as Error).message ?? err);
+		else console.error("Metadata load error:", (err as Error)?.message ?? err);
 		if (isDev) reportDevErrorFromCatch(err);
 	}
 	return null;
@@ -760,7 +760,13 @@ function startMetadata(
 ): { outcome: Promise<MetadataOutcome>; data: Promise<Record<string, any> | null> } {
 	const outcome = loadMetadata(route, params, url, locals, cookies, req).then(
 		(meta): MetadataOutcome => ({ meta }),
-		(err): MetadataOutcome => ({ decided: err }),
+		// loadMetadata only rethrows a Redirect/HttpError. Anything else here is a
+		// bug in its own error handling: render without metadata, as it would.
+		(err): MetadataOutcome => {
+			if (isRedirect(err) || isHttpError(err)) return { decided: err };
+			console.error("Metadata load error:", err);
+			return { meta: null };
+		},
 	);
 	const data = outcome.then((o) => {
 		if ("meta" in o) return o.meta?.data ?? null;
@@ -975,7 +981,7 @@ export async function renderSSRStream(
 				);
 			}
 			if (isDev) console.error("SSR load error:", err);
-			else console.error("SSR load error:", (err as Error).message ?? err);
+			else console.error("SSR load error:", (err as Error)?.message ?? err);
 			if (isDev) reportDevErrorFromCatch(err);
 			return renderErrorPage(
 				500,
@@ -1065,7 +1071,7 @@ export async function renderSSRStream(
 			));
 		} catch (err) {
 			if (isDev) console.error("SSR render error:", err);
-			else console.error("SSR render error:", (err as Error).message ?? err);
+			else console.error("SSR render error:", (err as Error)?.message ?? err);
 			if (isDev) reportDevErrorFromCatch(err);
 			// Render-phase errors fall through to deepest boundary like a page error.
 			return renderErrorPage(
@@ -1408,7 +1414,7 @@ export async function renderErrorPage(
 				return compress(html, "text/html; charset=utf-8", req, status);
 			} catch (err) {
 				if (isDev) console.error("Nested error page render failed:", err);
-				else console.error("Nested error page render failed:", (err as Error).message ?? err);
+				else console.error("Nested error page render failed:", (err as Error)?.message ?? err);
 				if (isDev) reportDevErrorFromCatch(err);
 				// fall through to global / text fallback
 			}
@@ -1446,7 +1452,7 @@ export async function renderErrorPage(
 			return compress(html, "text/html; charset=utf-8", req, status);
 		} catch (err) {
 			if (isDev) console.error("Error page render failed:", err);
-			else console.error("Error page render failed:", (err as Error).message ?? err);
+			else console.error("Error page render failed:", (err as Error)?.message ?? err);
 			if (isDev) reportDevErrorFromCatch(err);
 		}
 	}

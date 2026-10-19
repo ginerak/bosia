@@ -84,7 +84,15 @@ export class LoaderCookies {
 		this.buffered.clear();
 		const reports = this.reports;
 		this.reports = [];
-		for (const log of reports) log();
+		for (const log of reports) {
+			// Runs inside the caller's finally: a throw would replace the request's
+			// real error and skip the logs after it.
+			try {
+				log();
+			} catch (err) {
+				console.error("[bosia] failed to report a loader error:", err);
+			}
+		}
 	}
 
 	/** Drop every loader's writes: something else decided the response. */

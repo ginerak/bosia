@@ -114,6 +114,7 @@ beforeAll(async () => {
 			`\tif (url.searchParams.has("meta-slow")) await Bun.sleep(${SLEEP * 2});\n` +
 			`\tif (url.searchParams.has("meta-redirect")) throw redirect(303, "/");\n` +
 			`\tif (url.searchParams.has("meta-404")) throw error(404, "no seo record");\n` +
+			`\tif (url.searchParams.has("meta-falsy")) throw undefined;\n` +
 			`\treturn { title: "Par title", data: { fromMeta: "m", metaStart } };\n` +
 			`}\n` +
 			`export async function load({ parent, metadata, url, setHeaders }) {\n` +
@@ -385,9 +386,20 @@ describe("review fixes, pass 10", () => {
 		expect(body.errorOrigin).toBe("layout");
 	});
 
-	test("a loader that throws undefined still fails the request", async () => {
+	test("a loader that throws undefined still fails the request, at its own boundary", async () => {
 		const res = await fetch(`${origin}/par?falsy`);
 		expect(res.status).toBe(500);
+		const data = await fetch(`${origin}/__bosia/data/par.json?falsy`);
+		expect(data.status).toBe(500);
+		const body = await data.json();
+		expect(body.errorDepth).toBe(0);
+		expect(body.errorOrigin).toBe("layout");
+	});
+
+	test("a metadata() that throws undefined renders the page without metadata", async () => {
+		const res = await fetch(`${origin}/par?meta-falsy`);
+		expect(res.status).toBe(200);
+		expect(await res.text()).toContain("Par");
 	});
 
 	test("the page load does not start once a layout has decided the response", async () => {

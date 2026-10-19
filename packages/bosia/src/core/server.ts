@@ -458,7 +458,7 @@ async function resolve(event: RequestEvent): Promise<Response> {
 				);
 			}
 			if (isDev) console.error("Data endpoint error:", err);
-			else console.error("Data endpoint error:", (err as Error).message ?? err);
+			else console.error("Data endpoint error:", (err as Error)?.message ?? err);
 			if (isDev) reportDevErrorFromCatch(err);
 			if (isDev) {
 				const detail = err instanceof Error ? (err.stack ?? err.message) : String(err);
@@ -636,7 +636,7 @@ async function resolve(event: RequestEvent): Promise<Response> {
 				return Response.json({ error: err.message }, { status: err.status });
 			}
 			if (isDev) console.error("API route error:", err);
-			else console.error("API route error:", (err as Error).message ?? err);
+			else console.error("API route error:", (err as Error)?.message ?? err);
 			if (isDev) reportDevErrorFromCatch(err);
 			if (isDev) {
 				const detail = err instanceof Error ? (err.stack ?? err.message) : String(err);
@@ -888,7 +888,7 @@ async function resolve(event: RequestEvent): Promise<Response> {
 					return renderErrorPage(err.status, err.message, url, request);
 				}
 				if (isDev) console.error("Form action error:", err);
-				else console.error("Form action error:", (err as Error).message ?? err);
+				else console.error("Form action error:", (err as Error)?.message ?? err);
 				if (isDev) reportDevErrorFromCatch(err);
 				if (isEnhanced) {
 					return Response.json(
@@ -1205,7 +1205,7 @@ async function handleRequest(request: Request, url: URL): Promise<Response> {
 			return out;
 		}
 		if (isDev) console.error("Unhandled request error:", err);
-		else console.error("Unhandled request error:", (err as Error).message ?? err);
+		else console.error("Unhandled request error:", (err as Error)?.message ?? err);
 		if (isDev) reportDevErrorFromCatch(err);
 		if (isDev) {
 			const detail = err instanceof Error ? (err.stack ?? err.message) : String(err);
