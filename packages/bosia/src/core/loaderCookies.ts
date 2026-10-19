@@ -1,5 +1,5 @@
 import type { Cookies } from "./hooks.ts";
-import type { CookieJar } from "./cookies.ts";
+import { CookieJar } from "./cookies.ts";
 
 /**
  * The cookie jar as the loaders see it, one writer per loader (layout index,
@@ -24,7 +24,14 @@ export class LoaderCookies {
 
 	writer(index: number): Cookies {
 		const jar = this.jar;
-		const serialize = (jar as Partial<CookieJar>).serialize?.bind(jar);
+		// Only a plain CookieJar takes the serialize fast path. A wrapper — a Proxy,
+		// a subclass or object overriding set/delete — has its own calls replayed,
+		// so its overrides still run.
+		const plain =
+			jar instanceof CookieJar &&
+			jar.set === CookieJar.prototype.set &&
+			jar.delete === CookieJar.prototype.delete;
+		const serialize = plain ? jar.serialize.bind(jar) : undefined;
 		const buffer = (op: string | (() => void)) => {
 			if (this.done || index >= this.keepBelow) return;
 			let ops = this.buffered.get(index);

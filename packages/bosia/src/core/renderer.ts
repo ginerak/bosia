@@ -616,6 +616,15 @@ export async function loadRouteData(
 function noop() {}
 
 /**
+ * What the page load sees in place of `metadata.data` when metadata() threw a
+ * Redirect/HttpError. Not the error itself: the page task would otherwise stamp
+ * a page boundary onto the very object the caller is about to report, in the
+ * background, and the error page chosen would depend on timing. The caller
+ * always handles the metadata outcome first, so this never reaches a response.
+ */
+const METADATA_DECIDED = Symbol("bosia.metadataDecided");
+
+/**
  * parent() can reject (an ancestor failed, timed out or redirected). A loader
  * that starts it and never awaits it — it failed first — must not leave an
  * unhandled rejection: in production that exits the process. The caller still
@@ -639,7 +648,7 @@ function loaderFailure(
 	origin: ErrorOrigin,
 	layoutData: (Record<string, any> | null)[],
 ): unknown {
-	if (isRedirect(err)) return err;
+	if (isRedirect(err) || err === METADATA_DECIDED) return err;
 	const partial = layoutData.map((d) => d ?? {});
 	if (isHttpError(err)) {
 		stampErrorContext(err, depth, origin, partial);
@@ -711,7 +720,7 @@ export function startMetadata(
 	);
 	const data = outcome.then((o) => {
 		if ("meta" in o) return o.meta?.data ?? null;
-		if (isRedirect(o.err) || isHttpError(o.err)) throw o.err;
+		if (isRedirect(o.err) || isHttpError(o.err)) throw METADATA_DECIDED;
 		return null;
 	});
 	data.catch(noop);

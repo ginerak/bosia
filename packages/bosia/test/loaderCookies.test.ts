@@ -61,3 +61,36 @@ describe("LoaderCookies", () => {
 		expect(calls).toEqual(["delete a", "set b=2"]);
 	});
 });
+
+describe("LoaderCookies with a wrapped CookieJar", () => {
+	test("a Proxy that overrides set() still has its override run", () => {
+		const jar = new CookieJar("");
+		const wrapped = new Proxy(jar, {
+			get(target, prop, receiver) {
+				if (prop === "set") {
+					return (n: string, v: string, o?: object) =>
+						target.set(n, v, { ...o, domain: "example.com" });
+				}
+				const value = Reflect.get(target, prop, receiver);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		});
+		const lc = new LoaderCookies(wrapped);
+		lc.writer(0).set("session", "1");
+		lc.commit();
+		expect(jar.outgoing[0]).toContain("Domain=example.com");
+	});
+
+	test("a subclass that overrides set() still has its override run", () => {
+		class Prefixed extends CookieJar {
+			override set(n: string, v: string, o?: object) {
+				super.set(`app_${n}`, v, o);
+			}
+		}
+		const jar = new Prefixed("");
+		const lc = new LoaderCookies(jar);
+		lc.writer(0).set("session", "1");
+		lc.commit();
+		expect(jar.outgoing[0]).toStartWith("app_session=1");
+	});
+});

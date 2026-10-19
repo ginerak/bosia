@@ -99,7 +99,7 @@ beforeAll(async () => {
 	);
 	writeFileSync(
 		join(par, "+page.server.ts"),
-		`import { redirect } from "bosia";\n` +
+		`import { redirect, error } from "bosia";\n` +
 			`export const cache = false;\n` +
 			`export async function metadata({ url }) {\n` +
 			`\tconst metaStart = Date.now();\n` +
@@ -107,6 +107,7 @@ beforeAll(async () => {
 			// layout is still running and parent() really waits.
 			`\tif (!url.searchParams.has("slow")) await Bun.sleep(${SLEEP});\n` +
 			`\tif (url.searchParams.has("meta-redirect")) throw redirect(303, "/");\n` +
+			`\tif (url.searchParams.has("meta-404")) throw error(404, "no seo record");\n` +
 			`\treturn { title: "Par title", data: { fromMeta: "m", metaStart } };\n` +
 			`}\n` +
 			`export async function load({ parent, metadata, url }) {\n` +
@@ -338,6 +339,19 @@ describe("a reused Response without per-request headers", () => {
 			expect(res.status).toBe(204);
 			expect(res.headers.get("x-content-type-options")).toBe("nosniff");
 			expect(res.headers.get("x-own")).toBe("1");
+		}
+	});
+});
+
+describe("review fixes, pass 4", () => {
+	test("a metadata() HttpError on client navigation always reports the root boundary", async () => {
+		for (let i = 0; i < 5; i++) {
+			const res = await fetch(`${origin}/__bosia/data/par.json?meta-404`);
+			expect(res.status).toBe(404);
+			const body = await res.json();
+			expect(body.error).toMatchObject({ status: 404, message: "no seo record" });
+			expect(body.errorDepth).toBeNull();
+			expect(body.errorOrigin).toBeNull();
 		}
 	});
 });
