@@ -139,3 +139,11 @@ test("handlers get the parsed url and a lazy query", async () => {
 	const res = await app.fetch(req("/q?a=1&b=2"));
 	expect(await res.json()).toEqual({ path: "/q", query: { a: "1", b: "2" } });
 });
+
+test("a handler can still replace ctx.query", async () => {
+	const app = new BosiaApp().get("/q", (ctx) => {
+		ctx.query = { ...ctx.query, added: "1" };
+		return ctx.query;
+	});
+	expect(await (await app.fetch(req("/q?a=1"))).json()).toEqual({ a: "1", added: "1" });
+});

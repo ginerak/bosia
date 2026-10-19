@@ -55,11 +55,12 @@ beforeAll(async () => {
 	);
 	writeFileSync(
 		join(routes, "+layout.server.ts"),
-		`import { error } from "bosia";\n` +
+		`import { error, redirect } from "bosia";\n` +
 			`export async function load({ url }) {\n` +
 			`\tconst rootStart = Date.now();\n` +
 			`\tawait Bun.sleep(${SLEEP});\n` +
 			`\tif (url.searchParams.has("boom-root")) throw error(404, "root");\n` +
+			`\tif (url.searchParams.has("guest")) throw redirect(303, "/");\n` +
 			`\treturn { root: "r", rootStart };\n` +
 			`}\n`,
 	);
@@ -71,8 +72,15 @@ beforeAll(async () => {
 	writeFileSync(
 		join(par, "+layout.server.ts"),
 		`import { error } from "bosia";\n` +
-			`export async function load({ url }) {\n` +
+			`export async function load({ url, cookies, parent }) {\n` +
 			`\tconst innerStart = Date.now();\n` +
+			`\tif (url.searchParams.has("cookie")) cookies.set("from_inner", "1");\n` +
+			// Starts parent() and fails before awaiting it; parent() then rejects
+			// with the root's redirect. Must not crash the server.
+			`\tif (url.searchParams.has("orphan")) {\n` +
+			`\t\tparent();\n` +
+			`\t\tthrow new Error("own failure");\n` +
+			`\t}\n` +
 			`\tif (url.searchParams.has("boom-inner")) throw error(403, "inner");\n` +
 			`\tawait Bun.sleep(${SLEEP});\n` +
 			`\treturn { innerStart };\n` +
@@ -234,5 +242,41 @@ describe("static files skip the user's handle hook", () => {
 	test("pages still run the hook", async () => {
 		await fetch(`${origin}/`);
 		expect((await stats()).hooks).toContain("/");
+	});
+});
+
+describe("review fixes", () => {
+	test("a parent() left unawaited when an ancestor redirects does not crash the server", async () => {
+		const res = await fetch(`${origin}/par?guest&orphan`, { redirect: "manual" });
+		expect(res.status).toBe(303);
+		// The orphaned parent() rejects once the root finishes; give it time.
+		await Bun.sleep(SLEEP * 2);
+		expect((await fetch(`${origin}/_health`)).ok).toBe(true);
+	});
+
+	test("a metadata() redirect withdraws cookies the layouts set meanwhile", async () => {
+		const res = await fetch(`${origin}/par?meta-redirect&cookie`, { redirect: "manual" });
+		expect(res.status).toBe(303);
+		expect(res.headers.get("set-cookie") ?? "").not.toContain("from_inner");
+	});
+
+	test("a failing ancestor withdraws cookies set by deeper loaders", async () => {
+		const res = await fetch(`${origin}/par?boom-root&cookie`);
+		expect(res.status).toBe(404);
+		expect(res.headers.get("set-cookie") ?? "").not.toContain("from_inner");
+	});
+
+	test("cookies from a loader on a normal response still ship", async () => {
+		const res = await fetch(`${origin}/par?cookie`);
+		expect(res.status).toBe(200);
+		expect(res.headers.get("set-cookie") ?? "").toContain("from_inner=1");
+	});
+
+	test("on client navigation, a metadata() redirect decides the response and the page load does not run", async () => {
+		const before = (await stats()).pageLoads;
+		const res = await fetch(`${origin}/__bosia/data/par.json?meta-redirect&cookie`);
+		expect(await res.json()).toMatchObject({ redirect: "/", status: 303 });
+		expect(res.headers.get("set-cookie") ?? "").not.toContain("from_inner");
+		expect((await stats()).pageLoads).toBe(before);
 	});
 });

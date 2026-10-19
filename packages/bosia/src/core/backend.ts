@@ -165,6 +165,10 @@ export class BosiaApp {
 				get query() {
 					return (query ??= Object.fromEntries(url.searchParams));
 				},
+				// Handlers may replace it, as they could when it was a plain property.
+				set query(value) {
+					query = value;
+				},
 				url,
 				set,
 			});

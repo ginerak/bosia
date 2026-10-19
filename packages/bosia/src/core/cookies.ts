@@ -158,4 +158,12 @@ export class CookieJar implements Cookies {
 	get outgoing(): readonly string[] {
 		return this._outgoing;
 	}
+
+	/** Withdraw Set-Cookie headers this jar emitted (framework-internal). */
+	retract(headers: readonly string[]): void {
+		for (const h of headers) {
+			const i = this._outgoing.lastIndexOf(h);
+			if (i !== -1) this._outgoing.splice(i, 1);
+		}
+	}
 }

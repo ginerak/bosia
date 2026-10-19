@@ -451,6 +451,7 @@ export async function loadRouteData(
 	match?: RouteMatch<(typeof serverRoutes)[number]> | null,
 	mask?: LoaderMask,
 	parentSnapshots?: Record<number, Record<string, any>>,
+	loaderCookies: LoaderCookies = new LoaderCookies(cookies),
 ) {
 	match ??= findMatch(serverRoutes, url.pathname);
 	if (!match) return null;
@@ -519,8 +520,8 @@ export async function loadRouteData(
 									params: trackedParams(params, deps),
 									url: trackedUrl(url, deps),
 									locals,
-									cookies: trackedCookies(cookies, deps),
-									parent: () => gate(parentOf(i)),
+									cookies: trackedCookies(loaderCookies.writer(i), deps),
+									parent: () => handled(gate(parentOf(i))),
 									fetch: trackedFetch(fetch, origin, deps),
 									metadata: null,
 									depends: makeDepends(deps),
@@ -562,8 +563,8 @@ export async function loadRouteData(
 								params: trackedParams(params, deps),
 								url: trackedUrl(url, deps),
 								locals,
-								cookies: trackedCookies(cookies, deps),
-								parent: () => gate(parentOf(layers.length)),
+								cookies: trackedCookies(loaderCookies.writer(layers.length), deps),
+								parent: () => handled(gate(parentOf(layers.length))),
 								fetch: trackedFetch(fetch, origin, deps),
 								metadata,
 								depends: makeDepends(deps),
@@ -582,7 +583,12 @@ export async function loadRouteData(
 	for (let i = 0; i < layers.length; i++) {
 		const depth = route.layoutServers[i]!.depth;
 		const layer = await layers[i]!;
-		if (layer instanceof Failed) throw loaderFailure(layer.err, depth, "layout", layoutData);
+		if (layer instanceof Failed) {
+			// Deeper loaders kept running, but serially they never would have:
+			// their cookies must not ride on this layer's redirect or error page.
+			loaderCookies.cancelFrom(i + 1);
+			throw loaderFailure(layer.err, depth, "layout", layoutData);
+		}
 		layoutData[depth] = layer.data;
 		layoutDeps[depth] = layer.deps;
 	}
@@ -602,9 +608,65 @@ export async function loadRouteData(
 
 function noop() {}
 
+/**
+ * parent() can reject (an ancestor failed, timed out or redirected). A loader
+ * that starts it and never awaits it — it failed first — must not leave an
+ * unhandled rejection: in production that exits the process. The caller still
+ * gets the same promise and sees the rejection when it awaits.
+ */
+function handled<T>(p: Promise<T>): Promise<T> {
+	p.catch(noop);
+	return p;
+}
+
 /** A loader task's failure, resolved rather than rejected. */
 class Failed {
 	constructor(readonly err: unknown) {}
+}
+
+/**
+ * The cookie jar as the loaders see it, one writer per loader (layout index,
+ * page = layout count). Loaders run concurrently, so one that has already been
+ * overruled — by a failing ancestor layer, or by a metadata() redirect/error —
+ * can still call cookies.set(). Serially it never would have run, so its
+ * writes are withdrawn and later ones dropped (`cancelFrom`).
+ */
+export class LoaderCookies {
+	private written = new Map<number, string[]>();
+	private cancelledFrom = Infinity;
+
+	constructor(private jar: Cookies) {}
+
+	writer(index: number): Cookies {
+		const jar = this.jar;
+		const record = (write: () => void) => {
+			if (index >= this.cancelledFrom) return;
+			const out = (jar as { outgoing?: readonly string[] }).outgoing;
+			const before = out?.length ?? 0;
+			write();
+			if (!out) return;
+			let list = this.written.get(index);
+			if (!list) this.written.set(index, (list = []));
+			list.push(...out.slice(before));
+		};
+		return {
+			get: (name) => jar.get(name),
+			getAll: () => jar.getAll(),
+			set: (name, value, options) => record(() => jar.set(name, value, options)),
+			delete: (name, options) => record(() => jar.delete(name, options)),
+		};
+	}
+
+	/** Withdraw and stop the writes of every loader at `index` or deeper. */
+	cancelFrom(index: number): void {
+		this.cancelledFrom = Math.min(this.cancelledFrom, index);
+		const retract = (this.jar as { retract?: (h: readonly string[]) => void }).retract;
+		for (const [i, headers] of this.written) {
+			if (i < index) continue;
+			retract?.call(this.jar, headers);
+			this.written.delete(i);
+		}
+	}
 }
 
 /** The error a failed loader at `depth` throws: redirects pass through,
@@ -673,7 +735,7 @@ type MetadataOutcome = { meta: Metadata | null } | { err: unknown };
  * run for a response that metadata() already decided, and is null on any other
  * failure (the page renders without metadata, as before).
  */
-function startMetadata(
+export function startMetadata(
 	route: any,
 	params: Record<string, string>,
 	url: URL,
@@ -763,22 +825,34 @@ export async function renderSSRStream(
 		// Nothing is committed until every one has settled, so a Redirect or
 		// HttpError from any of them still gets a proper response.
 		const meta = startMetadata(route, params, url, locals, cookies, req);
+		const loaderCookies = new LoaderCookies(cookies);
 		// pageMod is already loaded when the cache flag was unknown; otherwise
 		// fold its import into this parallel block instead of a serial await.
 		const loading = Promise.all([
-			loadRouteData(url, locals, req, cookies, meta.data, match),
+			loadRouteData(
+				url,
+				locals,
+				req,
+				cookies,
+				meta.data,
+				match,
+				undefined,
+				undefined,
+				loaderCookies,
+			),
 			Promise.all(route.layoutModules.map((l: () => Promise<any>) => l())),
 			pageMod ?? route.pageModule(),
 		]);
 		// Awaited only after the metadata outcome, which may return first.
 		loading.catch(noop);
 
-		// metadata() outcome first: it decided the response before loaders ran,
-		// and still does.
+		// metadata() outcome first: it decided the response before the loaders
+		// ran, and still does — their cookie writes are withdrawn with it.
 		let metadata: Metadata | null = null;
 		const metaOutcome = await meta.outcome;
 		if ("meta" in metaOutcome) metadata = metaOutcome.meta;
 		else {
+			loaderCookies.cancelFrom(0);
 			const err = metaOutcome.err;
 			if (isRedirect(err)) {
 				// Not Response.redirect(): it rejects relative URLs on Workers.
@@ -1056,8 +1130,9 @@ export async function renderPageWithFormData(
 	// metadata(), loaders and module imports all start now; only the page load
 	// waits for metadata.data. The metadata outcome is still handled first.
 	const meta = startMetadata(route, params, url, locals, cookies, req);
+	const loaderCookies = new LoaderCookies(cookies);
 	const loading = Promise.all([
-		loadRouteData(url, locals, req, cookies, meta.data, match),
+		loadRouteData(url, locals, req, cookies, meta.data, match, undefined, undefined, loaderCookies),
 		route.pageModule(),
 		Promise.all(route.layoutModules.map((l: () => Promise<any>) => l())),
 	]);
@@ -1067,6 +1142,7 @@ export async function renderPageWithFormData(
 	const metaOutcome = await meta.outcome;
 	if ("meta" in metaOutcome) metadata = metaOutcome.meta;
 	else {
+		loaderCookies.cancelFrom(0);
 		const err = metaOutcome.err;
 		if (isRedirect(err))
 			return new Response(null, { status: err.status, headers: { Location: err.location } });

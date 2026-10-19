@@ -56,7 +56,8 @@ import {
 import { reportDevErrorFromCatch } from "./devErrorReport.ts";
 import {
 	loadRouteData,
-	loadMetadata,
+	startMetadata,
+	LoaderCookies,
 	renderSSRStream,
 	renderErrorPage,
 	renderPageWithFormData,
@@ -325,40 +326,48 @@ async function resolve(event: RequestEvent): Promise<Response> {
 				}
 			}
 			const runLoad = async () => {
-				// metadata() runs alongside the loaders. Failures stay non-fatal here, as
-				// before; the page load gets metadata.data, as it does on SSR.
-				// Only a +page.server.ts can export metadata(); skip the promise chain otherwise.
-				const metaP: Promise<Metadata | null> | null = pageMatch?.route.pageServer
-					? loadMetadata(
-							pageMatch.route,
-							pageMatch.params,
-							routeUrl,
-							locals,
-							cookies,
-							request,
-						).catch(() => null)
+				// metadata() runs alongside the loaders and the page load gets its data,
+				// as on SSR. A Redirect/HttpError from it decides the response here too
+				// (the catch below turns it into the router's JSON), and withdraws any
+				// cookies the loaders set meanwhile. Other failures were already logged
+				// and turned into null by loadMetadata. Only a +page.server.ts can
+				// export metadata(); skip the promise chain otherwise.
+				const meta = pageMatch?.route.pageServer
+					? startMetadata(pageMatch.route, pageMatch.params, routeUrl, locals, cookies, request)
 					: null;
-				const data = await loadRouteData(
+				const loaderCookies = new LoaderCookies(cookies);
+				const loading = loadRouteData(
 					routeUrl,
 					locals,
 					request,
 					cookies,
-					metaP ? metaP.then((m) => m?.data ?? null) : null,
+					meta ? meta.data : null,
 					pageMatch,
 					mask,
 					parentSnapshots,
+					loaderCookies,
 				);
+				let metaResult: Metadata | null = null;
+				if (meta) {
+					loading.catch(() => {});
+					const outcome = await meta.outcome;
+					if ("err" in outcome) {
+						loaderCookies.cancelFrom(0);
+						throw outcome.err;
+					}
+					metaResult = outcome.meta;
+				}
+				const data = await loading;
 
-				const meta = metaP ? await metaP : null;
 				// Explicit whitelist, not a spread: `metadata.data` feeds load() on the
 				// server and may hold secrets — it must not reach the client.
-				const metadata = meta
+				const metadata = metaResult
 					? {
-							title: meta.title,
-							description: meta.description,
-							meta: meta.meta,
-							link: meta.link,
-							lang: meta.lang,
+							title: metaResult.title,
+							description: metaResult.description,
+							meta: metaResult.meta,
+							link: metaResult.link,
+							lang: metaResult.lang,
 						}
 					: null;
 
