@@ -66,7 +66,15 @@ export class LoaderCookies {
 			if (index >= this.keepBelow) continue;
 			for (const op of this.buffered.get(index)!) {
 				if (typeof op === "string") jar.append!([op]);
-				else op();
+				else {
+					// A wrapper's own set() may throw at replay, outside any loader. Drop
+					// that one write, keep the rest: commit runs on the response path.
+					try {
+						op();
+					} catch (err) {
+						console.error("[bosia] cookies.set failed while committing loader cookies:", err);
+					}
+				}
 			}
 		}
 		this.buffered.clear();

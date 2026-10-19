@@ -94,3 +94,29 @@ describe("LoaderCookies with a wrapped CookieJar", () => {
 		expect(jar.outgoing[0]).toStartWith("app_session=1");
 	});
 });
+
+test("a replayed write that throws is dropped; the rest still commit", () => {
+	const calls: string[] = [];
+	const wrapped: Cookies = {
+		get: () => undefined,
+		getAll: () => ({}),
+		set: (n) => {
+			if (n === "bad") throw new Error("rejected by wrapper");
+			calls.push(n);
+		},
+		delete: () => {},
+	};
+	const lc = new LoaderCookies(wrapped);
+	lc.writer(0).set("bad", "1");
+	lc.writer(1).set("good", "1");
+	const errors: unknown[] = [];
+	const orig = console.error;
+	console.error = (...a: unknown[]) => void errors.push(a);
+	try {
+		expect(() => lc.commit()).not.toThrow();
+	} finally {
+		console.error = orig;
+	}
+	expect(calls).toEqual(["good"]);
+	expect(errors).toHaveLength(1);
+});
