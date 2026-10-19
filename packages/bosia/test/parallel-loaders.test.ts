@@ -42,8 +42,12 @@ beforeAll(async () => {
 	writeFileSync(
 		join(tmpDir, "src", "hooks.server.ts"),
 		`import type { Handle } from "bosia";\n` +
+			`const embed = new Response(null, { status: 204, headers: { "x-bosia-no-frame-guard": "1" } });\n` +
+			`const plainShared = new Response(null, { status: 204, headers: { "x-own": "1" } });\n` +
 			`export const handle: Handle = async ({ event, resolve }) => {\n` +
 			`\t${stats}.hooks.push(event.url.pathname);\n` +
+			`\tif (event.url.pathname === "/embed") return embed;\n` +
+			`\tif (event.url.pathname === "/plain-shared") return plainShared;\n` +
 			`\treturn resolve(event);\n` +
 			`};\n`,
 	);
@@ -57,9 +61,10 @@ beforeAll(async () => {
 	writeFileSync(
 		join(routes, "+layout.server.ts"),
 		`import { error, redirect } from "bosia";\n` +
-			`export async function load({ url }) {\n` +
+			`export async function load({ url, cookies }) {\n` +
 			`\tconst rootStart = Date.now();\n` +
 			`\tawait Bun.sleep(${SLEEP});\n` +
+			`\tif (url.searchParams.has("order")) cookies.set("theme", "dark");\n` +
 			`\tif (url.searchParams.has("boom-root")) throw error(404, "root");\n` +
 			`\tif (url.searchParams.has("guest")) throw redirect(303, "/");\n` +
 			`\treturn { root: "r", rootStart };\n` +
@@ -76,6 +81,7 @@ beforeAll(async () => {
 			`export async function load({ url, cookies, parent }) {\n` +
 			`\tconst innerStart = Date.now();\n` +
 			`\tif (url.searchParams.has("cookie")) cookies.set("from_inner", "1");\n` +
+			`\tif (url.searchParams.has("order")) cookies.set("theme", "light");\n` +
 			// Starts parent() and fails before awaiting it; parent() then rejects
 			// with the root's redirect. Must not crash the server.
 			`\tif (url.searchParams.has("orphan")) {\n` +
@@ -300,5 +306,38 @@ describe("a Response object shared across requests", () => {
 		const bob = b.headers.get("set-cookie") ?? "";
 		expect(bob).toContain("who=bob");
 		expect(bob).not.toContain("alice");
+	});
+});
+
+describe("review fixes, pass 3", () => {
+	test("Set-Cookie follows loader order: the deeper loader's write wins", async () => {
+		const res = await fetch(`${origin}/par?order`);
+		expect(res.status).toBe(200);
+		const themes = res.headers.getSetCookie().filter((c) => c.startsWith("theme="));
+		// Inner layout wrote first, root after its sleep; serial order is root → inner.
+		expect(themes.map((c) => c.split(";")[0])).toEqual(["theme=dark", "theme=light"]);
+	});
+
+	test("a reused Response keeps its frame-guard opt-out on every request", async () => {
+		for (let i = 0; i < 2; i++) {
+			const res = await fetch(`${origin}/embed`);
+			expect(res.status).toBe(204);
+			expect(res.headers.get("x-frame-options")).toBeNull();
+			expect(res.headers.get("x-bosia-no-frame-guard")).toBeNull();
+			// Bun sends a Response object it has sent before with none of its
+			// headers, so in-place decoration lost these from the second request on.
+			expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+		}
+	});
+});
+
+describe("a reused Response without per-request headers", () => {
+	test("keeps its security headers after the first request", async () => {
+		for (let i = 0; i < 3; i++) {
+			const res = await fetch(`${origin}/plain-shared`);
+			expect(res.status).toBe(204);
+			expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+			expect(res.headers.get("x-own")).toBe("1");
+		}
 	});
 });

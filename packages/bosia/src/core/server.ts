@@ -3,6 +3,7 @@ import { BosiaApp } from "./backend.ts";
 import { findMatch, compileRoutes, canonicalPathname } from "./matcher.ts";
 import { resolveApiMatch } from "./apiResolver.ts";
 import { memoizeRouteImports } from "./routeImports.ts";
+import { LoaderCookies } from "./loaderCookies.ts";
 import { apiRoutes, serverRoutes } from "bosia:routes";
 import { loadPlugins } from "./config.ts";
 import { readArtifact } from "./artifacts.ts";
@@ -57,7 +58,6 @@ import { reportDevErrorFromCatch } from "./devErrorReport.ts";
 import {
 	loadRouteData,
 	startMetadata,
-	LoaderCookies,
 	renderSSRStream,
 	renderErrorPage,
 	renderPageWithFormData,
@@ -349,15 +349,21 @@ async function resolve(event: RequestEvent): Promise<Response> {
 				);
 				let metaResult: Metadata | null = null;
 				if (meta) {
+					// Awaited below, after the metadata outcome.
 					loading.catch(() => {});
 					const outcome = await meta.outcome;
 					if ("err" in outcome) {
-						loaderCookies.cancelFrom(0);
+						loaderCookies.discard();
 						throw outcome.err;
 					}
 					metaResult = outcome.meta;
 				}
-				const data = await loading;
+				let data: Awaited<typeof loading>;
+				try {
+					data = await loading;
+				} finally {
+					loaderCookies.commit();
+				}
 
 				// Explicit whitelist, not a spread: `metadata.data` feeds load() on the
 				// server and may hold secrets — it must not reach the client.
@@ -924,6 +930,9 @@ if (_xfoDisabled) {
 
 const SECURITY_HEADER_ENTRIES = Object.entries(SECURITY_HEADERS);
 
+/** Responses already decorated in place (see handleRequest). */
+const decoratedInPlace = new WeakSet<Response>();
+
 /** Security, CSP, CORS and Set-Cookie headers every framework response carries.
  *  Throws on immutable headers; the caller then rebuilds the response. */
 function decorateHeaders(
@@ -1104,10 +1113,17 @@ async function handleRequest(request: Request, url: URL): Promise<Response> {
 			cookieJar.outgoing.length > 0 ||
 			CSP_ENABLED ||
 			CORS_CONFIG !== null ||
+			// The opt-out marker is deleted as it is read — from a copy, so a
+			// reused Response keeps it for the next request.
+			response.headers.has(NO_FRAME_GUARD_HEADER) ||
+			// Bun sends a Response object it has sent before with none of its
+			// headers: a reused one is copied every time after the first.
+			decoratedInPlace.has(response) ||
 			(!compressionOn && response.headers.has("content-encoding"));
 		if (!rebuild) {
 			try {
 				decorateHeaders(response.headers, request, nonce, cookieJar);
+				decoratedInPlace.add(response);
 			} catch {
 				rebuild = true;
 			}

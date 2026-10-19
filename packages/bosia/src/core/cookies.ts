@@ -116,6 +116,14 @@ export class CookieJar implements Cookies {
 	}
 
 	set(name: string, value: string, options?: CookieOptions): void {
+		this._outgoing.push(this.serialize(name, value, options));
+	}
+
+	/**
+	 * The Set-Cookie header `set()` would emit, validated, without emitting it.
+	 * Framework-internal: concurrent loaders buffer theirs and commit in order.
+	 */
+	serialize(name: string, value: string, options?: CookieOptions): string {
 		if (!VALID_COOKIE_NAME.test(name)) throw new Error(`Invalid cookie name: ${name}`);
 		const opts = { ...this._defaults, ...options };
 		if (!this._isHttps && opts.secure) {
@@ -148,7 +156,7 @@ export class CookieJar implements Cookies {
 			if (!canonical) throw new Error(`Invalid cookie sameSite: ${opts.sameSite}`);
 			header += `; SameSite=${canonical}`;
 		}
-		this._outgoing.push(header);
+		return header;
 	}
 
 	delete(name: string, options?: Pick<CookieOptions, "path" | "domain">): void {
@@ -159,11 +167,8 @@ export class CookieJar implements Cookies {
 		return this._outgoing;
 	}
 
-	/** Withdraw Set-Cookie headers this jar emitted (framework-internal). */
-	retract(headers: readonly string[]): void {
-		for (const h of headers) {
-			const i = this._outgoing.lastIndexOf(h);
-			if (i !== -1) this._outgoing.splice(i, 1);
-		}
+	/** Emit headers built by `serialize()` (framework-internal). */
+	append(headers: readonly string[]): void {
+		this._outgoing.push(...headers);
 	}
 }

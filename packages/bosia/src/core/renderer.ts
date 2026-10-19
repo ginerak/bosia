@@ -19,6 +19,7 @@ import {
 	serveCached,
 } from "./cache.ts";
 import type { CookieJar } from "./cookies.ts";
+import { LoaderCookies } from "./loaderCookies.ts";
 import { HttpError, Redirect, isHttpError, isRedirect } from "./errors.ts";
 import { pickErrorPage, type ErrorOrigin } from "./errorMatch.ts";
 import App from "./client/App.svelte";
@@ -451,10 +452,14 @@ export async function loadRouteData(
 	match?: RouteMatch<(typeof serverRoutes)[number]> | null,
 	mask?: LoaderMask,
 	parentSnapshots?: Record<number, Record<string, any>>,
-	loaderCookies: LoaderCookies = new LoaderCookies(cookies),
+	// Passed by a caller that runs metadata() alongside: it commits or discards
+	// once it knows the metadata outcome. Otherwise committed here.
+	callerCookies?: LoaderCookies,
 ) {
 	match ??= findMatch(serverRoutes, url.pathname);
 	if (!match) return null;
+	const ownsCookies = !callerCookies;
+	const loaderCookies = callerCookies ?? new LoaderCookies(cookies);
 
 	const { route, params } = match;
 	const fetch = makeFetch(req, url);
@@ -586,7 +591,8 @@ export async function loadRouteData(
 		if (layer instanceof Failed) {
 			// Deeper loaders kept running, but serially they never would have:
 			// their cookies must not ride on this layer's redirect or error page.
-			loaderCookies.cancelFrom(i + 1);
+			loaderCookies.keepOnlyBelow(i + 1);
+			if (ownsCookies) loaderCookies.commit();
 			throw loaderFailure(layer.err, depth, "layout", layoutData);
 		}
 		layoutData[depth] = layer.data;
@@ -594,6 +600,7 @@ export async function loadRouteData(
 	}
 
 	const page = pageTask instanceof Promise ? await pageTask : pageTask;
+	if (ownsCookies) loaderCookies.commit();
 	if (page instanceof Failed) {
 		throw loaderFailure(page.err, route.layoutModules.length, "page", layoutData);
 	}
@@ -622,51 +629,6 @@ function handled<T>(p: Promise<T>): Promise<T> {
 /** A loader task's failure, resolved rather than rejected. */
 class Failed {
 	constructor(readonly err: unknown) {}
-}
-
-/**
- * The cookie jar as the loaders see it, one writer per loader (layout index,
- * page = layout count). Loaders run concurrently, so one that has already been
- * overruled — by a failing ancestor layer, or by a metadata() redirect/error —
- * can still call cookies.set(). Serially it never would have run, so its
- * writes are withdrawn and later ones dropped (`cancelFrom`).
- */
-export class LoaderCookies {
-	private written = new Map<number, string[]>();
-	private cancelledFrom = Infinity;
-
-	constructor(private jar: Cookies) {}
-
-	writer(index: number): Cookies {
-		const jar = this.jar;
-		const record = (write: () => void) => {
-			if (index >= this.cancelledFrom) return;
-			const out = (jar as { outgoing?: readonly string[] }).outgoing;
-			const before = out?.length ?? 0;
-			write();
-			if (!out) return;
-			let list = this.written.get(index);
-			if (!list) this.written.set(index, (list = []));
-			list.push(...out.slice(before));
-		};
-		return {
-			get: (name) => jar.get(name),
-			getAll: () => jar.getAll(),
-			set: (name, value, options) => record(() => jar.set(name, value, options)),
-			delete: (name, options) => record(() => jar.delete(name, options)),
-		};
-	}
-
-	/** Withdraw and stop the writes of every loader at `index` or deeper. */
-	cancelFrom(index: number): void {
-		this.cancelledFrom = Math.min(this.cancelledFrom, index);
-		const retract = (this.jar as { retract?: (h: readonly string[]) => void }).retract;
-		for (const [i, headers] of this.written) {
-			if (i < index) continue;
-			retract?.call(this.jar, headers);
-			this.written.delete(i);
-		}
-	}
 }
 
 /** The error a failed loader at `depth` throws: redirects pass through,
@@ -852,7 +814,7 @@ export async function renderSSRStream(
 		const metaOutcome = await meta.outcome;
 		if ("meta" in metaOutcome) metadata = metaOutcome.meta;
 		else {
-			loaderCookies.cancelFrom(0);
+			loaderCookies.discard();
 			const err = metaOutcome.err;
 			if (isRedirect(err)) {
 				// Not Response.redirect(): it rejects relative URLs on Workers.
@@ -884,7 +846,9 @@ export async function renderSSRStream(
 			let pm: any;
 			[data, layoutMods, pm] = await loading;
 			pageMod = pm;
+			loaderCookies.commit();
 		} catch (err) {
+			loaderCookies.commit();
 			if (isRedirect(err))
 				return new Response(null, { status: err.status, headers: { Location: err.location } });
 			if (isHttpError(err)) {
@@ -1142,7 +1106,7 @@ export async function renderPageWithFormData(
 	const metaOutcome = await meta.outcome;
 	if ("meta" in metaOutcome) metadata = metaOutcome.meta;
 	else {
-		loaderCookies.cancelFrom(0);
+		loaderCookies.discard();
 		const err = metaOutcome.err;
 		if (isRedirect(err))
 			return new Response(null, { status: err.status, headers: { Location: err.location } });
@@ -1165,7 +1129,13 @@ export async function renderPageWithFormData(
 		// Continue with null metadata — don't break the page for a metadata failure
 	}
 
-	const [data, pageMod, layoutMods] = await loading;
+	let loaded: Awaited<typeof loading>;
+	try {
+		loaded = await loading;
+	} finally {
+		loaderCookies.commit();
+	}
+	const [data, pageMod, layoutMods] = loaded;
 
 	if (!data)
 		return renderErrorPage(
