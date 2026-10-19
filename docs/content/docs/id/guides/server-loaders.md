@@ -71,6 +71,8 @@ Semua loader sebuah route **dimulai bersamaan**. `await parent()` yang mengurutk
 
 > **Cek auth di loader layout tidak menjaga loader di bawahnya.** Jika layout root melempar `redirect()` untuk pengunjung tanpa sesi, loader anak yang tidak `await parent()` sudah terlanjur berjalan. Datanya dibuang, tetapi query-nya sudah dijalankan. Jaga route di [`handle`](/docs/guides/middleware-hooks) atau baca `locals`, atau `await parent()` sebelum melakukan apa pun yang tidak boleh dipicu tamu.
 
+> **Nilai yang ditaruh loader layout di `locals` tidak terlihat oleh loader lain tanpa `parent()`.** Loader berjalan bersamaan, jadi loader halaman bisa membaca `locals.user` sebelum layout yang mengisinya selesai. Isi nilai untuk seluruh request di hook [`handle`](/docs/guides/middleware-hooks), yang berjalan sebelum semua loader, atau kembalikan dari layout lalu baca dengan `await parent()`.
+
 ## Metadata
 
 Ekspor fungsi `metadata` untuk mengatur judul halaman dan meta tag:

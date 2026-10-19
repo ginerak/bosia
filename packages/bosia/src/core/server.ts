@@ -1090,13 +1090,21 @@ async function handleRequest(request: Request, url: URL): Promise<Response> {
 			}
 		}
 
-		// Decorate the response in place: copying it into a new Response costs a
-		// header copy plus a body re-wrap on every request. Rebuilt only when the
-		// headers are immutable (a Workers `fetch()` result passed through), or on
-		// Workers (no runtime compression) when the body is already encoded: a
-		// hook's own pre-compressed Response lacks `encodeBody: "manual"` and
-		// Workers would compress it again.
-		let rebuild = !compressionOn && response.headers.has("content-encoding");
+		// Decorate the response in place when every header added is the same for
+		// every request (the security headers): copying into a new Response costs
+		// a header copy plus a body re-wrap. Per-request headers — Set-Cookie, a
+		// CSP nonce, CORS for this origin — always go on a copy: a handler may
+		// return one Response object to many requests, and writing them onto it
+		// would hand one user's cookie to the next. Also rebuilt when the headers
+		// are immutable (a Workers `fetch()` result passed through), or on Workers
+		// (no runtime compression) when the body is already encoded: a hook's own
+		// pre-compressed Response lacks `encodeBody: "manual"` and Workers would
+		// compress it again.
+		let rebuild =
+			cookieJar.outgoing.length > 0 ||
+			CSP_ENABLED ||
+			CORS_CONFIG !== null ||
+			(!compressionOn && response.headers.has("content-encoding"));
 		if (!rebuild) {
 			try {
 				decorateHeaders(response.headers, request, nonce, cookieJar);

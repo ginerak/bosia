@@ -3,7 +3,7 @@ title: Server Metadata
 description: Atur judul halaman, meta tag, Open Graph, dan atribut lang dengan fungsi metadata().
 ---
 
-Fungsi `metadata()` memungkinkan Anda mendefinisikan tag SEO dan head untuk tiap halaman, berjalan di server bersamaan dengan loader layout. `load()` halaman menunggunya dan menerima `data`-nya sebagai `metadata`.
+Fungsi `metadata()` memungkinkan Anda mendefinisikan tag SEO dan head untuk tiap halaman, berjalan di server bersamaan dengan loader layout. `load()` halaman menunggunya dan menerima `data`-nya sebagai `metadata`. `redirect()` atau `error()` yang dilempar di sini tetap menentukan respons dan `load()` halaman tidak berjalan, tetapi loader layout sudah dimulai: query-nya berjalan, hanya cookie-nya yang dibuang. Jaga route di hook `handle` bila itu penting.
 
 ## Penggunaan Dasar
 

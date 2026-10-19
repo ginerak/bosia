@@ -26,6 +26,7 @@ beforeAll(async () => {
 	mkdirSync(par, { recursive: true });
 	mkdirSync(join(routes, "count"), { recursive: true });
 	mkdirSync(join(routes, "feed.txt"), { recursive: true });
+	mkdirSync(join(routes, "shared"), { recursive: true });
 	mkdirSync(join(tmpDir, "public"), { recursive: true });
 
 	writeFileSync(join(tmpDir, "tsconfig.json"), JSON.stringify({ compilerOptions: { paths: {} } }));
@@ -115,6 +116,16 @@ beforeAll(async () => {
 		join(routes, "count", "+server.ts"),
 		`export function GET() {\n\treturn Response.json(${stats});\n}\n` +
 			`export const cache = false;\n`,
+	);
+	// One Response object returned to every request, each setting its own cookie.
+	writeFileSync(
+		join(routes, "shared", "+server.ts"),
+		`export const cache = false;\n` +
+			`const shared = new Response(null, { status: 204 });\n` +
+			`export function GET({ cookies, url }) {\n` +
+			`\tcookies.set("who", url.searchParams.get("who") ?? "none");\n` +
+			`\treturn shared;\n` +
+			`}\n`,
 	);
 	// A route that looks like a static file: must still win over public/ lookup.
 	writeFileSync(
@@ -278,5 +289,16 @@ describe("review fixes", () => {
 		expect(await res.json()).toMatchObject({ redirect: "/", status: 303 });
 		expect(res.headers.get("set-cookie") ?? "").not.toContain("from_inner");
 		expect((await stats()).pageLoads).toBe(before);
+	});
+});
+
+describe("a Response object shared across requests", () => {
+	test("one request's Set-Cookie never reaches the next", async () => {
+		const a = await fetch(`${origin}/shared?who=alice`);
+		const b = await fetch(`${origin}/shared?who=bob`);
+		expect(a.headers.get("set-cookie")).toContain("who=alice");
+		const bob = b.headers.get("set-cookie") ?? "";
+		expect(bob).toContain("who=bob");
+		expect(bob).not.toContain("alice");
 	});
 });

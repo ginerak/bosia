@@ -71,6 +71,8 @@ All loaders of a route **start at the same time**. `await parent()` is what orde
 
 > **An auth check in a layout loader does not guard the loaders below it.** If the root layout throws `redirect()` for a visitor without a session, a child loader that doesn't `await parent()` has already started. Its data is discarded, but its queries ran. Guard routes in [`handle`](/docs/guides/middleware-hooks) or read `locals`, or `await parent()` before doing anything a guest must not trigger.
 
+> **Values a layout loader puts on `locals` are not visible to other loaders without `parent()`.** Loaders run concurrently, so a page loader can read `locals.user` before the layout that sets it has finished. Set request-wide values in the [`handle`](/docs/guides/middleware-hooks) hook, which runs before every loader, or return them from the layout and read them with `await parent()`.
+
 ## Metadata
 
 Export a `metadata` function to set page title and meta tags:
