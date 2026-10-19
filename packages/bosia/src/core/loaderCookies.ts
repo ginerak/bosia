@@ -87,6 +87,10 @@ export class LoaderCookies {
 	/** Drop every loader's writes: something else decided the response. */
 	discard(): void {
 		this.done = true;
+		this.overruled = true;
 		this.buffered.clear();
 	}
+
+	/** True once something else (metadata()) decided the response. */
+	overruled = false;
 }
