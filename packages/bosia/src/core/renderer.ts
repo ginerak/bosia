@@ -799,18 +799,19 @@ export async function renderSSRStream(
 		const loaderCookies = new LoaderCookies(cookies);
 		// pageMod is already loaded when the cache flag was unknown; otherwise
 		// fold its import into this parallel block instead of a serial await.
+		const routeData = loadRouteData(
+			url,
+			locals,
+			req,
+			cookies,
+			meta.data,
+			match,
+			undefined,
+			undefined,
+			loaderCookies,
+		);
 		const loading = Promise.all([
-			loadRouteData(
-				url,
-				locals,
-				req,
-				cookies,
-				meta.data,
-				match,
-				undefined,
-				undefined,
-				loaderCookies,
-			),
+			routeData,
 			Promise.all(route.layoutModules.map((l: () => Promise<any>) => l())),
 			pageMod ?? route.pageModule(),
 		]);
@@ -857,6 +858,9 @@ export async function renderSSRStream(
 			pageMod = pm;
 			loaderCookies.commit();
 		} catch (err) {
+			// A module import can fail first, while loaders still run: commit only
+			// once loadRouteData has decided which loaders' writes stand.
+			await routeData.catch(noop);
 			loaderCookies.commit();
 			if (isRedirect(err))
 				return new Response(null, { status: err.status, headers: { Location: err.location } });
@@ -1104,8 +1108,19 @@ export async function renderPageWithFormData(
 	// waits for metadata.data. The metadata outcome is still handled first.
 	const meta = startMetadata(route, params, url, locals, cookies, req);
 	const loaderCookies = new LoaderCookies(cookies);
+	const routeData = loadRouteData(
+		url,
+		locals,
+		req,
+		cookies,
+		meta.data,
+		match,
+		undefined,
+		undefined,
+		loaderCookies,
+	);
 	const loading = Promise.all([
-		loadRouteData(url, locals, req, cookies, meta.data, match, undefined, undefined, loaderCookies),
+		routeData,
 		route.pageModule(),
 		Promise.all(route.layoutModules.map((l: () => Promise<any>) => l())),
 	]);
@@ -1142,6 +1157,8 @@ export async function renderPageWithFormData(
 	try {
 		loaded = await loading;
 	} finally {
+		// See renderSSRStream: a failed import must not commit ahead of the loaders.
+		await routeData.catch(noop);
 		loaderCookies.commit();
 	}
 	const [data, pageMod, layoutMods] = loaded;

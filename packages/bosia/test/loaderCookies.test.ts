@@ -120,3 +120,19 @@ test("a replayed write that throws is dropped; the rest still commit", () => {
 	expect(calls).toEqual(["good"]);
 	expect(errors).toHaveLength(1);
 });
+
+test("a replayed write uses the options as they were at the call", () => {
+	const seen: Array<object | undefined> = [];
+	const wrapped: Cookies = {
+		get: () => undefined,
+		getAll: () => ({}),
+		set: (_n, _v, o) => void seen.push(o),
+		delete: () => {},
+	};
+	const lc = new LoaderCookies(wrapped);
+	const o: { path: string; maxAge?: number } = { path: "/" };
+	lc.writer(0).set("a", "1", o);
+	o.maxAge = 0;
+	lc.commit();
+	expect(seen).toEqual([{ path: "/" }]);
+});

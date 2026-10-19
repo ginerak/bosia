@@ -13,7 +13,8 @@ import { CookieJar } from "./cookies.ts";
  *
  * With a CookieJar, headers are built (and validated) at the call, so an
  * invalid cookie still throws inside the loader. Any other Cookies object (a
- * hook may wrap event.cookies) has its calls replayed at commit instead.
+ * hook may wrap event.cookies) has its calls replayed at commit instead, with
+ * a copy of the options as they were at the call; a throw there is logged.
  */
 export class LoaderCookies {
 	private buffered = new Map<number, Array<string | (() => void)>>();
@@ -42,12 +43,16 @@ export class LoaderCookies {
 			get: (name) => jar.get(name),
 			getAll: () => jar.getAll(),
 			set: (name, value, options) =>
-				buffer(serialize ? serialize(name, value, options) : () => jar.set(name, value, options)),
+				buffer(
+					serialize
+						? serialize(name, value, options)
+						: () => jar.set(name, value, options && { ...options }),
+				),
 			delete: (name, options) =>
 				buffer(
 					serialize
 						? serialize(name, "", { ...options, maxAge: 0 })
-						: () => jar.delete(name, options),
+						: () => jar.delete(name, options && { ...options }),
 				),
 		};
 	}
