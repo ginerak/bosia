@@ -127,7 +127,7 @@ export async function load({ setHeaders }: LoadEvent) {
 }
 ```
 
-Header diterapkan ke response HTML SSR maupun response data navigasi klien. Menyetel header yang sama dua kali (di loader mana pun dalam rantai) akan melempar error. Loader berjalan bersamaan, jadi bila dua loader menyetel header yang sama, loader yang lebih dalam yang gagal, siapa pun yang memanggil lebih dulu. `set-cookie` dilarang — gunakan API `cookies`. Saat prerendering, `setHeaders` tidak berefek (hanya file HTML yang ditulis ke disk). Jika loader membaca cookies, response data tetap `private, no-cache` meskipun loader menyetel `cache-control` sendiri — privasi mengalahkan niat.
+Header diterapkan ke response HTML SSR maupun response data navigasi klien. Menyetel header yang sama dua kali (di loader mana pun dalam rantai) akan melempar error. Panggilan itu melempar error di loader yang lebih dalam, seperti saat loader berjalan satu per satu. Bila loader yang lebih dalam memanggil lebih dulu (loader berjalan bersamaan), loader itu gagal setelah keduanya selesai. `set-cookie` dilarang — gunakan API `cookies`. Saat prerendering, `setHeaders` tidak berefek (hanya file HTML yang ditulis ke disk). Jika loader membaca cookies, response data tetap `private, no-cache` meskipun loader menyetel `cache-control` sendiri — privasi mengalahkan niat.
 
 ## Penanganan Error
 

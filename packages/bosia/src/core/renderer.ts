@@ -463,14 +463,28 @@ async function loadRouteData(
 	const origin = url.origin;
 	const layoutData: (Record<string, any> | null)[] = [];
 	const layoutDeps: (LoaderDeps | null)[] = [];
-	// Each loader's setHeaders() fills its own record (a duplicate within one
-	// loader throws at the call); they merge into loaderHeaders in loader order
-	// below. Loaders run concurrently, so a header set by two of them fails the
-	// deeper one — the loader whose call threw when they ran one after another —
-	// whichever happened to call first. Keys stored lowercased.
+	// Each loader's setHeaders() fills its own record; they merge into
+	// loaderHeaders in loader order below. A call throws, as it did serially,
+	// when this loader or a shallower one already set the header — a loader can
+	// still catch that. A deeper loader that set it first cannot be told yet:
+	// the merge then fails the deeper one, the loader whose call threw when
+	// they ran one after another. Keys stored lowercased.
 	const loaderHeaders: Record<string, string> = {};
 	const headersOf: Record<string, string>[] = [];
-	const setHeadersFor = (index: number) => makeSetHeaders((headersOf[index] = {}));
+	const setHeadersFor = (index: number) => {
+		const own = makeSetHeaders((headersOf[index] = {}));
+		return (headers: Record<string, string>) => {
+			for (const key of Object.keys(headers)) {
+				const k = key.toLowerCase();
+				for (let j = 0; j < index; j++) {
+					if (headersOf[j] && k in headersOf[j]!) {
+						throw new Error(`setHeaders() called twice for header "${k}"`);
+					}
+				}
+			}
+			own(headers);
+		};
+	};
 	const mergeHeaders = (index: number): Error | null => {
 		for (const [k, v] of Object.entries(headersOf[index] ?? {})) {
 			if (k in loaderHeaders) return new Error(`setHeaders() called twice for header "${k}"`);

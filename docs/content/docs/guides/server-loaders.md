@@ -129,7 +129,7 @@ export async function load({ setHeaders }: LoadEvent) {
 }
 ```
 
-Headers land on both the SSR HTML response and the client-navigation data response. Setting the same header twice (across any loaders in the chain) throws. Loaders run at the same time, so when two loaders set the same header, the deeper one fails, whichever called first. `set-cookie` is forbidden — use the `cookies` API instead. During prerendering `setHeaders` is a no-op (only HTML files are written to disk). If the loader read cookies, the data response stays `private, no-cache` regardless of a loader-set `cache-control` — privacy beats intent.
+Headers land on both the SSR HTML response and the client-navigation data response. Setting the same header twice (across any loaders in the chain) throws. The call throws in the deeper loader, as when loaders ran one after another. If the deeper loader got there first (loaders run at the same time), it fails instead once both finish. `set-cookie` is forbidden — use the `cookies` API instead. During prerendering `setHeaders` is a no-op (only HTML files are written to disk). If the loader read cookies, the data response stays `private, no-cache` regardless of a loader-set `cache-control` — privacy beats intent.
 
 ## Cookie Forwarding
 

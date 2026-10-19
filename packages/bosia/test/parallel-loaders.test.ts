@@ -65,7 +65,7 @@ beforeAll(async () => {
 			`export async function load({ url, cookies, setHeaders }) {\n` +
 			`\tconst rootStart = Date.now();\n` +
 			`\tawait Bun.sleep(${SLEEP});\n` +
-			`\tif (url.searchParams.has("dup-header")) setHeaders({ "x-dup": "root" });\n` +
+			`\tif (url.searchParams.has("dup-header") || url.searchParams.has("dup-caught")) setHeaders({ "x-dup": "root" });\n` +
 			`\tif (url.searchParams.has("order")) cookies.set("theme", "dark");\n` +
 			`\tif (url.searchParams.has("boom-root")) throw error(404, "root");\n` +
 			`\tif (url.searchParams.has("guest")) throw redirect(303, "/");\n` +
@@ -116,9 +116,13 @@ beforeAll(async () => {
 			`\tif (url.searchParams.has("meta-404")) throw error(404, "no seo record");\n` +
 			`\treturn { title: "Par title", data: { fromMeta: "m", metaStart } };\n` +
 			`}\n` +
-			`export async function load({ parent, metadata, url }) {\n` +
+			`export async function load({ parent, metadata, url, setHeaders }) {\n` +
 			`\t${stats}.pageLoads++;\n` +
 			`\tconst p = await parent();\n` +
+			// The root already set it: the call throws here, and the page may catch it.
+			`\tif (url.searchParams.has("dup-caught")) {\n` +
+			`\t\ttry { setHeaders({ "x-dup": "page" }); } catch { return { caught: true }; }\n` +
+			`\t}\n` +
 			// Own work after a long parent() wait: inside LOAD_TIMEOUT on its own,
 			// past it if the wait were counted too.
 			`\tif (url.searchParams.has("slow")) await Bun.sleep(${SLEEP});\n` +
@@ -400,5 +404,12 @@ describe("review fixes, pass 10", () => {
 		expect(res.status).toBe(200);
 		const html = await res.text();
 		expect(html).toContain("Sync title");
+	});
+
+	test("a loader can still catch a duplicate setHeaders() of a header a parent set", async () => {
+		const res = await fetch(`${origin}/__bosia/data/par.json?dup-caught`);
+		expect(res.status).toBe(200);
+		expect(res.headers.get("x-dup")).toBe("root");
+		expect((await res.json()).pageData.caught).toBe(true);
 	});
 });
