@@ -108,8 +108,9 @@ export type LoadEvent = {
 
 /**
  * Build a `setHeaders` closure over a shared accumulator. Keys are stored
- * lowercased; duplicates (any casing) and `set-cookie` throw. Shared across
- * all loaders of one request so cross-loader duplicates are caught too.
+ * lowercased; duplicates (any casing) and `set-cookie` throw. One per loader:
+ * loadRouteData merges them in loader order, so a header two loaders set
+ * fails the deeper one.
  */
 export function makeSetHeaders(
 	acc: Record<string, string>,

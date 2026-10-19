@@ -3,7 +3,6 @@ import { BosiaApp } from "./backend.ts";
 import { findMatch, compileRoutes, canonicalPathname } from "./matcher.ts";
 import { resolveApiMatch } from "./apiResolver.ts";
 import { memoizeRouteImports } from "./routeImports.ts";
-import { LoaderCookies } from "./loaderCookies.ts";
 import { apiRoutes, serverRoutes } from "bosia:routes";
 import { loadPlugins } from "./config.ts";
 import { readArtifact } from "./artifacts.ts";
@@ -56,8 +55,7 @@ import {
 } from "./cache.ts";
 import { reportDevErrorFromCatch } from "./devErrorReport.ts";
 import {
-	loadRouteData,
-	startMetadata,
+	startRouteLoad,
 	renderSSRStream,
 	renderErrorPage,
 	renderPageWithFormData,
@@ -253,6 +251,22 @@ function parseActionName(url: URL): string {
 const staticManifest = isDev ? null : buildStaticManifest(OUT_DIR);
 const prerenderManifest = isDev ? null : buildPrerenderManifest(OUT_DIR);
 
+type ApiMatch = Exclude<
+	Awaited<ReturnType<typeof resolveApiMatch<(typeof apiRoutes)[number]>>>,
+	null
+>;
+
+/**
+ * What serveStaticEarly already learned about a request it passed on, so
+ * resolve() doesn't repeat it: `api` is the +server.ts match it found (null:
+ * none, undefined: not looked up), `missed` that the manifest has no file at
+ * `path`. Keyed by path too — a hook may rewrite `event.url`.
+ */
+const earlyLookups = new WeakMap<
+	Request,
+	{ path: string; api: ApiMatch | null | undefined; missed: boolean }
+>();
+
 /**
  * Prod manifest hit for a GET/HEAD, or null. The data endpoint is never a file. Same precedence as resolve():
  * `/dist/` and `/__bosia/` are framework-owned, any other path yields to a
@@ -265,16 +279,28 @@ function serveStaticEarly(
 	if (!staticManifest || !isStaticPath(path) || path.startsWith("/__bosia/data/")) return null;
 	if (request.method !== "GET" && request.method !== "HEAD") return null;
 	if (path.startsWith("/dist/") || path.startsWith("/__bosia/"))
-		return serveManifestHit(request, path);
+		return serveManifestHit(request, path, undefined);
 	const api = resolveApiMatch(apiRoutes, path);
 	// Only a `.json` path resolves its route asynchronously (see apiResolver.ts).
-	if (api instanceof Promise) return api.then((m) => (m ? null : serveManifestHit(request, path)));
-	return api ? null : serveManifestHit(request, path);
+	if (api instanceof Promise) return api.then((m) => afterApiMatch(request, path, m));
+	return afterApiMatch(request, path, api);
 }
 
-function serveManifestHit(request: Request, path: string): Response | null {
+function afterApiMatch(request: Request, path: string, api: ApiMatch | null): Response | null {
+	if (!api) return serveManifestHit(request, path, null);
+	earlyLookups.set(request, { path, api, missed: false });
+	return null;
+}
+
+function serveManifestHit(
+	request: Request,
+	path: string,
+	api: ApiMatch | null | undefined,
+): Response | null {
 	const hit = lookupStatic(staticManifest!, path);
-	return hit ? serveStatic(hit, request) : null;
+	if (hit) return serveStatic(hit, request);
+	earlyLookups.set(request, { path, api, missed: true });
+	return null;
 }
 
 async function resolve(event: RequestEvent): Promise<Response> {
@@ -328,42 +354,21 @@ async function resolve(event: RequestEvent): Promise<Response> {
 			const runLoad = async () => {
 				// metadata() runs alongside the loaders and the page load gets its data,
 				// as on SSR. A Redirect/HttpError from it decides the response here too
-				// (the catch below turns it into the router's JSON), and withdraws any
-				// cookies the loaders set meanwhile. Other failures were already logged
-				// and turned into null by loadMetadata. Only a +page.server.ts can
-				// export metadata(); skip the promise chain otherwise.
-				const meta = pageMatch?.route.pageServer
-					? startMetadata(pageMatch.route, pageMatch.params, routeUrl, locals, cookies, request)
-					: null;
-				const loaderCookies = new LoaderCookies(cookies);
-				const loading = loadRouteData(
+				// (the catch below turns it into the router's JSON).
+				const load = startRouteLoad(
 					routeUrl,
 					locals,
 					request,
 					cookies,
-					meta ? meta.data : null,
 					pageMatch,
+					Promise.resolve(),
 					mask,
 					parentSnapshots,
-					loaderCookies,
 				);
-				let metaResult: Metadata | null = null;
-				if (meta) {
-					// Awaited below, after the metadata outcome.
-					loading.catch(() => {});
-					const outcome = await meta.outcome;
-					if ("err" in outcome) {
-						loaderCookies.discard();
-						throw outcome.err;
-					}
-					metaResult = outcome.meta;
-				}
-				let data: Awaited<typeof loading>;
-				try {
-					data = await loading;
-				} finally {
-					loaderCookies.commit();
-				}
+				const outcome = await load.metadata;
+				if ("decided" in outcome) throw outcome.decided;
+				const metaResult = outcome.meta;
+				const [data] = await load.loaded();
 
 				// Explicit whitelist, not a spread: `metadata.data` feeds load() on the
 				// server and may hold secrets — it must not reach the client.
@@ -462,7 +467,13 @@ async function resolve(event: RequestEvent): Promise<Response> {
 	// by a user `+server.ts`, so serve them straight from the manifest before the
 	// API scan. A miss falls through to the normal path (which 404s). Keeps the
 	// api-before-static ordering intact for every user-facing path.
-	if (staticManifest && (path.startsWith("/dist/") || path.startsWith("/__bosia/"))) {
+	const early = earlyLookups.get(request);
+	const known = early?.path === path ? early : undefined;
+	if (
+		staticManifest &&
+		!known?.missed &&
+		(path.startsWith("/dist/") || path.startsWith("/__bosia/"))
+	) {
 		const hit = lookupStatic(staticManifest, path);
 		if (hit) return serveStatic(hit, request);
 	}
@@ -471,7 +482,7 @@ async function resolve(event: RequestEvent): Promise<Response> {
 	// Matched BEFORE static fallthrough so explicit handlers shadow extension-
 	// based static detection (e.g. `/uploads/[...path]/+server.ts` can serve
 	// `.webp` URLs that would otherwise be intercepted by isStaticPath).
-	const apiMaybe = resolveApiMatch(apiRoutes, path);
+	const apiMaybe = known?.api !== undefined ? known.api : resolveApiMatch(apiRoutes, path);
 	const apiMatch = apiMaybe instanceof Promise ? await apiMaybe : apiMaybe;
 	if (apiMatch) {
 		if (warmingUp) return new Response(null, { status: 404 });
@@ -636,7 +647,7 @@ async function resolve(event: RequestEvent): Promise<Response> {
 	if (isStaticPath(path)) {
 		// Prod fast path: single Map lookup, no per-request stat calls.
 		if (staticManifest) {
-			const hit = lookupStatic(staticManifest, path);
+			const hit = known?.missed ? null : lookupStatic(staticManifest, path);
 			if (hit) return serveStatic(hit, request);
 			return new Response("Not Found", { status: 404 });
 		}

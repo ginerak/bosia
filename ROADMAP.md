@@ -9,7 +9,7 @@
 
 > Profiled the demo under load (4 vCPU, oha, 50 conns, demo hooks on). A bare `Bun.serve` here does ~75k rps; cached Bosia pages did ~16k. Self-time went to rebuilding every response, re-running `import()` per request, and parsing the URL twice.
 
-- [x] 🟠 `handleRequest` copied headers + re-wrapped the body (`new Response(response.body)`) on every response. Now decorates `response.headers` in place; only immutable headers (a Workers `fetch()` result) fall back to the rebuild. Test simulates the immutable case.
+- [x] 🟠 `handleRequest` copied headers + re-wrapped the body (`new Response(response.body)`) on every response. Now decorates `response.headers` in place when every added header is the same for each request. It still rebuilds when the response carries cookies, CSP, CORS or the frame-guard opt-out, when the same Response object was sent before (Bun sends a reused Response without its headers), when headers are immutable (a Workers `fetch()` result), and on Workers for an encoded body. Tests cover the immutable and reused cases.
 - [x] 🟠 Route importers (`() => import(…)`) went through the module loader on every call: ~22% of data-endpoint CPU. `core/routeImports.ts` memoizes them at startup; a rejected import is retried. Safe because dev restarts the server on every rebuild.
 - [x] 🟡 `BosiaApp` parsed `request.url`, then `frameworkHandler` parsed it again, and `query` was built for the catch-all that never reads it. One parse, passed as `ctx.url`; `query` is a lazy getter.
 - [x] ⚪ `dedupKey` built + sorted a `URLSearchParams` on every cache lookup; returns the path when there is no query. SSR encodes one string instead of three + concat.

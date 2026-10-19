@@ -8,7 +8,6 @@ import {
 	collectTags,
 	computeCacheKey,
 	computeIdentityHash,
-	concatChunks,
 	deferCacheWrite,
 	invalidate,
 	invalidateAll,
@@ -488,23 +487,6 @@ describe("precompressed responses opt out of runtime re-encoding", () => {
 			"manual",
 			"manual",
 		]);
-	});
-});
-
-// ─── concatChunks ────────────────────────────────────────
-
-describe("concatChunks", () => {
-	test("concatenates multiple chunks in order", () => {
-		const a = new Uint8Array([1, 2]);
-		const b = new Uint8Array([3, 4, 5]);
-		const c = new Uint8Array([6]);
-		const out = concatChunks([a, b, c]);
-		expect(Array.from(out)).toEqual([1, 2, 3, 4, 5, 6]);
-	});
-
-	test("empty input → empty Uint8Array", () => {
-		const out = concatChunks([]);
-		expect(out.length).toBe(0);
 	});
 });
 

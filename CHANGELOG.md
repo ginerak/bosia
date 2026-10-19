@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - On client-side navigation, a page's `load()` now receives `metadata.data`, as it does on the first page load (it got `null`).
 - On client-side navigation, a `redirect()` or `error()` thrown in `metadata()` now redirects or shows the error, as on the first page load. It used to be ignored and the page rendered without metadata.
 - On client-side navigation, when `metadata()` and a loader set the same cookie, the loader's value now wins, as it already did on the first page load.
+- When two loaders set the same header with `setHeaders()`, the deeper loader is the one that fails, every time.
 
 ## [1.1.4] - 2026-10-04
 

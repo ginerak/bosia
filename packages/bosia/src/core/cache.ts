@@ -324,19 +324,6 @@ export function deferCacheWrite(fn: () => void | Promise<void>): void {
 	else queueMicrotask(fn);
 }
 
-/** Concatenate multiple Uint8Array chunks into one buffer. */
-export function concatChunks(chunks: Uint8Array[]): Bytes {
-	let total = 0;
-	for (const c of chunks) total += c.length;
-	const out = new Uint8Array(new ArrayBuffer(total));
-	let off = 0;
-	for (const c of chunks) {
-		out.set(c, off);
-		off += c.length;
-	}
-	return out;
-}
-
 // ─── Miss coalescing ─────────────────────────────────────
 // Stampede protection for cache misses. The first miss on a key becomes the
 // leader (gets `release`); concurrent misses become waiters (get `wait`).

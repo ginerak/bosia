@@ -160,8 +160,9 @@ type MaybePromise<T> = T | Promise<T>;
 /**
  * `withTimeout` for a loader whose `parent()` may wait on other loaders. The
  * clock stops while `gate` holds a parent() wait, so a slow layout above does
- * not spend the budget of the loaders below it — each still gets `ms` of its
- * own work, as when they ran one after another.
+ * not spend the budget of the loaders below it. Work the loader started before
+ * that wait keeps running off the clock, so a loader can take its ancestors'
+ * time plus `ms` — the bound it had when they ran one after another.
  */
 function runLoader<T>(
 	ms: number,
@@ -443,33 +444,38 @@ export type LoaderMask = {
 	layouts: boolean[];
 };
 
-export async function loadRouteData(
+// The caller (startRouteLoad) commits or discards `loaderCookies` once it knows
+// the metadata outcome.
+async function loadRouteData(
 	url: URL,
 	locals: Record<string, any>,
 	req: Request,
-	cookies: Cookies,
-	metadataData: MaybePromise<Record<string, any> | null> = null,
-	match?: RouteMatch<(typeof serverRoutes)[number]> | null,
+	match: RouteMatch<(typeof serverRoutes)[number]>,
+	loaderCookies: LoaderCookies,
+	metadataData: MaybePromise<Record<string, any> | null>,
 	mask?: LoaderMask,
 	parentSnapshots?: Record<number, Record<string, any>>,
-	// Passed by a caller that runs metadata() alongside: it commits or discards
-	// once it knows the metadata outcome. Otherwise committed here.
-	callerCookies?: LoaderCookies,
 ) {
-	match ??= findMatch(serverRoutes, url.pathname);
-	if (!match) return null;
-	const ownsCookies = !callerCookies;
-	const loaderCookies = callerCookies ?? new LoaderCookies(cookies);
-
 	const { route, params } = match;
 	const fetch = makeFetch(req, url);
 	const origin = url.origin;
 	const layoutData: (Record<string, any> | null)[] = [];
 	const layoutDeps: (LoaderDeps | null)[] = [];
-	// Shared across layout + page loaders so cross-loader duplicate
-	// setHeaders() calls throw. Keys stored lowercased.
+	// Each loader's setHeaders() fills its own record (a duplicate within one
+	// loader throws at the call); they merge into loaderHeaders in loader order
+	// below. Loaders run concurrently, so a header set by two of them fails the
+	// deeper one — the loader whose call threw when they ran one after another —
+	// whichever happened to call first. Keys stored lowercased.
 	const loaderHeaders: Record<string, string> = {};
-	const setHeaders = makeSetHeaders(loaderHeaders);
+	const headersOf: Record<string, string>[] = [];
+	const setHeadersFor = (index: number) => makeSetHeaders((headersOf[index] = {}));
+	const mergeHeaders = (index: number): Error | null => {
+		for (const [k, v] of Object.entries(headersOf[index] ?? {})) {
+			if (k in loaderHeaders) return new Error(`setHeaders() called twice for header "${k}"`);
+			loaderHeaders[k] = v;
+		}
+		return null;
+	};
 
 	// Every loader starts at once; parent() is what orders them. A layer that
 	// never calls parent() no longer waits for the layers above it to finish.
@@ -531,7 +537,7 @@ export async function loadRouteData(
 									metadata: null,
 									depends: makeDepends(deps),
 									platform: getPlatform(),
-									setHeaders,
+									setHeaders: setHeadersFor(i),
 								}),
 						)) ?? {};
 					return { data: result, deps, contrib: result };
@@ -574,7 +580,7 @@ export async function loadRouteData(
 								metadata,
 								depends: makeDepends(deps),
 								platform: getPlatform(),
-								setHeaders,
+								setHeaders: setHeadersFor(layers.length),
 							}),
 						)) ?? {};
 					return { data, deps };
@@ -588,23 +594,23 @@ export async function loadRouteData(
 	for (let i = 0; i < layers.length; i++) {
 		const depth = route.layoutServers[i]!.depth;
 		const layer = await layers[i]!;
-		if (layer instanceof Failed) {
+		const err = layer instanceof Failed ? layer.err : mergeHeaders(i);
+		if (err) {
 			// Deeper loaders kept running, but serially they never would have:
 			// their cookies must not ride on this layer's redirect or error page.
 			loaderCookies.keepOnlyBelow(i + 1);
-			if (ownsCookies) loaderCookies.commit();
-			throw loaderFailure(layer.err, depth, "layout", layoutData, loaderCookies);
+			throw loaderFailure(err, depth, "layout", layoutData, loaderCookies);
 		}
-		layoutData[depth] = layer.data;
-		layoutDeps[depth] = layer.deps;
+		layoutData[depth] = (layer as Layer).data;
+		layoutDeps[depth] = (layer as Layer).deps;
 	}
 
 	const page = pageTask instanceof Promise ? await pageTask : pageTask;
-	if (ownsCookies) loaderCookies.commit();
-	if (page instanceof Failed) {
-		throw loaderFailure(page.err, route.layoutModules.length, "page", layoutData, loaderCookies);
+	const pageErr = page instanceof Failed ? page.err : mergeHeaders(layers.length);
+	if (pageErr) {
+		throw loaderFailure(pageErr, route.layoutModules.length, "page", layoutData, loaderCookies);
 	}
-	const { data: pageData, deps: pageDeps } = page;
+	const { data: pageData, deps: pageDeps } = page as Page;
 
 	// `params` are always attached to pageData for client-side router consumption.
 	// When pageData is skipped, the client merges its cached pageData with current
@@ -702,16 +708,17 @@ export async function loadMetadata(
 	return null;
 }
 
-type MetadataOutcome = { meta: Metadata | null } | { err: unknown };
+/** metadata()'s result, or the Redirect/HttpError with which it decided the response. */
+type MetadataOutcome = { meta: Metadata | null } | { decided: Redirect | HttpError };
 
 /**
- * Start `metadata()` without waiting for it. `outcome` never rejects — the
- * caller decides what a failure means. `data` is what the page load receives
- * as `metadata`: it rejects on a Redirect/HttpError, so the page load does not
- * run for a response that metadata() already decided, and is null on any other
- * failure (the page renders without metadata, as before).
+ * Start `metadata()` without waiting for it. `outcome` never rejects:
+ * loadMetadata already logged any other failure and turned it into null (the
+ * page renders without metadata). `data` is what the page load receives as
+ * `metadata`: it rejects when metadata() decided the response, so the page load
+ * does not run for it.
  */
-export function startMetadata(
+function startMetadata(
 	route: any,
 	params: Record<string, string>,
 	url: URL,
@@ -721,15 +728,103 @@ export function startMetadata(
 ): { outcome: Promise<MetadataOutcome>; data: Promise<Record<string, any> | null> } {
 	const outcome = loadMetadata(route, params, url, locals, cookies, req).then(
 		(meta): MetadataOutcome => ({ meta }),
-		(err): MetadataOutcome => ({ err }),
+		(err): MetadataOutcome => ({ decided: err }),
 	);
 	const data = outcome.then((o) => {
 		if ("meta" in o) return o.meta?.data ?? null;
-		if (isRedirect(o.err) || isHttpError(o.err)) throw METADATA_DECIDED;
-		return null;
+		throw METADATA_DECIDED;
 	});
 	data.catch(noop);
 	return { outcome, data };
+}
+
+export type RouteData = NonNullable<Awaited<ReturnType<typeof loadRouteData>>>;
+
+/**
+ * metadata(), the server loaders and `alongside` (the caller's module imports),
+ * all started at once — the one orchestration SSR, form re-renders and the data
+ * endpoint share.
+ *
+ * `metadata` settles first and never rejects. When it holds `decided`,
+ * metadata() decided the response before the loaders ran, and still does: their
+ * cookie writes are already withdrawn, and `loaded()` must not be called.
+ * Otherwise `loaded()` waits for the loaders and `alongside`, then commits the
+ * cookie writes that stand — only after the loaders have settled, even when an
+ * import in `alongside` fails first. `data` is null without a route match.
+ */
+export function startRouteLoad<A>(
+	url: URL,
+	locals: Record<string, any>,
+	req: Request,
+	cookies: Cookies,
+	match: RouteMatch<(typeof serverRoutes)[number]> | null,
+	alongside: Promise<A>,
+	mask?: LoaderMask,
+	parentSnapshots?: Record<number, Record<string, any>>,
+): {
+	metadata: Promise<MetadataOutcome>;
+	loaded: () => Promise<[RouteData | null, A]>;
+} {
+	const loaderCookies = new LoaderCookies(cookies);
+	// Only a +page.server.ts can export metadata(): skip the promise chain otherwise.
+	const meta = match?.route.pageServer
+		? startMetadata(match.route, match.params, url, locals, cookies, req)
+		: null;
+	const routeData = match
+		? loadRouteData(
+				url,
+				locals,
+				req,
+				match,
+				loaderCookies,
+				meta ? meta.data : null,
+				mask,
+				parentSnapshots,
+			)
+		: Promise.resolve(null);
+	const loading = Promise.all([routeData, alongside]);
+	// Awaited only by loaded(), after the metadata outcome — which may return first.
+	loading.catch(noop);
+	const metadata: Promise<MetadataOutcome> = meta
+		? meta.outcome.then((o) => {
+				if ("decided" in o) loaderCookies.discard();
+				return o;
+			})
+		: Promise.resolve({ meta: null });
+	const loaded = async () => {
+		try {
+			return await loading;
+		} finally {
+			await routeData.catch(noop);
+			loaderCookies.commit();
+		}
+	};
+	return { metadata, loaded };
+}
+
+/** The response for metadata() having decided it. */
+function metadataDecidedResponse(
+	err: Redirect | HttpError,
+	url: URL,
+	req: Request,
+	route: any,
+	nonce: string | undefined,
+): Response | Promise<Response> {
+	// Not Response.redirect(): it rejects relative URLs on Workers.
+	if (isRedirect(err)) {
+		return new Response(null, { status: err.status, headers: { Location: err.location } });
+	}
+	return renderErrorPage(
+		err.status,
+		err.message,
+		url,
+		req,
+		route,
+		undefined,
+		undefined,
+		undefined,
+		nonce,
+	);
 }
 
 // ─── Streaming SSR Renderer ──────────────────────────────
@@ -800,73 +895,33 @@ export async function renderSSRStream(
 		// ── Pre-stream phase: metadata() + load() + module imports, all at once ──
 		// Nothing is committed until every one has settled, so a Redirect or
 		// HttpError from any of them still gets a proper response.
-		const meta = startMetadata(route, params, url, locals, cookies, req);
-		const loaderCookies = new LoaderCookies(cookies);
 		// pageMod is already loaded when the cache flag was unknown; otherwise
 		// fold its import into this parallel block instead of a serial await.
-		const routeData = loadRouteData(
+		const load = startRouteLoad(
 			url,
 			locals,
 			req,
 			cookies,
-			meta.data,
 			match,
-			undefined,
-			undefined,
-			loaderCookies,
+			Promise.all([
+				Promise.all(route.layoutModules.map((l: () => Promise<any>) => l())),
+				pageMod ?? route.pageModule(),
+			]),
 		);
-		const loading = Promise.all([
-			routeData,
-			Promise.all(route.layoutModules.map((l: () => Promise<any>) => l())),
-			pageMod ?? route.pageModule(),
-		]);
-		// Awaited only after the metadata outcome, which may return first.
-		loading.catch(noop);
-
-		// metadata() outcome first: it decided the response before the loaders
-		// ran, and still does — their cookie writes are withdrawn with it.
-		let metadata: Metadata | null = null;
-		const metaOutcome = await meta.outcome;
-		if ("meta" in metaOutcome) metadata = metaOutcome.meta;
-		else {
-			loaderCookies.discard();
-			const err = metaOutcome.err;
-			if (isRedirect(err)) {
-				// Not Response.redirect(): it rejects relative URLs on Workers.
-				return new Response(null, { status: err.status, headers: { Location: err.location } });
-			}
-			if (isHttpError(err)) {
-				return renderErrorPage(
-					err.status,
-					err.message,
-					url,
-					req,
-					route,
-					undefined,
-					undefined,
-					undefined,
-					nonce,
-				);
-			}
-			if (isDev) console.error("Metadata load error:", err);
-			else console.error("Metadata load error:", (err as Error).message ?? err);
-			if (isDev) reportDevErrorFromCatch(err);
-			// Continue with null metadata — don't break the page for a metadata failure
+		const metaOutcome = await load.metadata;
+		if ("decided" in metaOutcome) {
+			return metadataDecidedResponse(metaOutcome.decided, url, req, route, nonce);
 		}
+		const metadata = metaOutcome.meta;
 
-		let data: Awaited<ReturnType<typeof loadRouteData>>;
+		let data: RouteData | null;
 		let layoutMods: any[];
 
 		try {
-			let pm: any;
-			[data, layoutMods, pm] = await loading;
-			pageMod = pm;
-			loaderCookies.commit();
+			let modules: [any[], any];
+			[data, modules] = await load.loaded();
+			[layoutMods, pageMod] = modules;
 		} catch (err) {
-			// A module import can fail first, while loaders still run: commit only
-			// once loadRouteData has decided which loaders' writes stand.
-			await routeData.catch(noop);
-			loaderCookies.commit();
 			if (isRedirect(err))
 				return new Response(null, { status: err.status, headers: { Location: err.location } });
 			if (isHttpError(err)) {
@@ -1111,62 +1166,24 @@ export async function renderPageWithFormData(
 
 	// metadata(), loaders and module imports all start now; only the page load
 	// waits for metadata.data. The metadata outcome is still handled first.
-	const meta = startMetadata(route, params, url, locals, cookies, req);
-	const loaderCookies = new LoaderCookies(cookies);
-	const routeData = loadRouteData(
+	const load = startRouteLoad(
 		url,
 		locals,
 		req,
 		cookies,
-		meta.data,
 		match,
-		undefined,
-		undefined,
-		loaderCookies,
+		Promise.all([
+			route.pageModule(),
+			Promise.all(route.layoutModules.map((l: () => Promise<any>) => l())),
+		]),
 	);
-	const loading = Promise.all([
-		routeData,
-		route.pageModule(),
-		Promise.all(route.layoutModules.map((l: () => Promise<any>) => l())),
-	]);
-	loading.catch(noop);
-
-	let metadata: Metadata | null = null;
-	const metaOutcome = await meta.outcome;
-	if ("meta" in metaOutcome) metadata = metaOutcome.meta;
-	else {
-		loaderCookies.discard();
-		const err = metaOutcome.err;
-		if (isRedirect(err))
-			return new Response(null, { status: err.status, headers: { Location: err.location } });
-		if (isHttpError(err)) {
-			return renderErrorPage(
-				err.status,
-				err.message,
-				url,
-				req,
-				route,
-				undefined,
-				undefined,
-				undefined,
-				nonce,
-			);
-		}
-		if (isDev) console.error("Metadata load error:", err);
-		else console.error("Metadata load error:", (err as Error).message ?? err);
-		if (isDev) reportDevErrorFromCatch(err);
-		// Continue with null metadata — don't break the page for a metadata failure
+	const metaOutcome = await load.metadata;
+	if ("decided" in metaOutcome) {
+		return metadataDecidedResponse(metaOutcome.decided, url, req, route, nonce);
 	}
+	const metadata = metaOutcome.meta;
 
-	let loaded: Awaited<typeof loading>;
-	try {
-		loaded = await loading;
-	} finally {
-		// See renderSSRStream: a failed import must not commit ahead of the loaders.
-		await routeData.catch(noop);
-		loaderCookies.commit();
-	}
-	const [data, pageMod, layoutMods] = loaded;
+	const [data, [pageMod, layoutMods]] = await load.loaded();
 
 	if (!data)
 		return renderErrorPage(

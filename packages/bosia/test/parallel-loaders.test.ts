@@ -61,9 +61,10 @@ beforeAll(async () => {
 	writeFileSync(
 		join(routes, "+layout.server.ts"),
 		`import { error, redirect } from "bosia";\n` +
-			`export async function load({ url, cookies }) {\n` +
+			`export async function load({ url, cookies, setHeaders }) {\n` +
 			`\tconst rootStart = Date.now();\n` +
 			`\tawait Bun.sleep(${SLEEP});\n` +
+			`\tif (url.searchParams.has("dup-header")) setHeaders({ "x-dup": "root" });\n` +
 			`\tif (url.searchParams.has("order")) cookies.set("theme", "dark");\n` +
 			`\tif (url.searchParams.has("boom-root")) throw error(404, "root");\n` +
 			`\tif (url.searchParams.has("guest")) throw redirect(303, "/");\n` +
@@ -78,8 +79,10 @@ beforeAll(async () => {
 	writeFileSync(
 		join(par, "+layout.server.ts"),
 		`import { error } from "bosia";\n` +
-			`export async function load({ url, cookies, parent }) {\n` +
+			`export async function load({ url, cookies, parent, setHeaders }) {\n` +
 			`\tconst innerStart = Date.now();\n` +
+			// Set before the root, which sets it after its sleep.
+			`\tif (url.searchParams.has("dup-header")) setHeaders({ "x-dup": "inner" });\n` +
 			`\tif (url.searchParams.has("cookie")) cookies.set("from_inner", "1");\n` +
 			`\tif (url.searchParams.has("order")) cookies.set("theme", "light");\n` +
 			// Starts parent() and fails before awaiting it; parent() then rejects
@@ -353,5 +356,16 @@ describe("review fixes, pass 4", () => {
 			expect(body.errorDepth).toBeNull();
 			expect(body.errorOrigin).toBeNull();
 		}
+	});
+});
+
+describe("review fixes, pass 10", () => {
+	test("a header set by two loaders fails the deeper one, whichever set it first", async () => {
+		const res = await fetch(`${origin}/__bosia/data/par.json?dup-header`);
+		expect(res.status).toBe(500);
+		const body = await res.json();
+		// Depth 1 is the inner layout: the one whose call threw when they ran in turn.
+		expect(body.errorDepth).toBe(1);
+		expect(body.errorOrigin).toBe("layout");
 	});
 });
