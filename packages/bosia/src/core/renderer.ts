@@ -593,7 +593,7 @@ export async function loadRouteData(
 			// their cookies must not ride on this layer's redirect or error page.
 			loaderCookies.keepOnlyBelow(i + 1);
 			if (ownsCookies) loaderCookies.commit();
-			throw loaderFailure(layer.err, depth, "layout", layoutData, loaderCookies.overruled);
+			throw loaderFailure(layer.err, depth, "layout", layoutData, loaderCookies);
 		}
 		layoutData[depth] = layer.data;
 		layoutDeps[depth] = layer.deps;
@@ -602,13 +602,7 @@ export async function loadRouteData(
 	const page = pageTask instanceof Promise ? await pageTask : pageTask;
 	if (ownsCookies) loaderCookies.commit();
 	if (page instanceof Failed) {
-		throw loaderFailure(
-			page.err,
-			route.layoutModules.length,
-			"page",
-			layoutData,
-			loaderCookies.overruled,
-		);
+		throw loaderFailure(page.err, route.layoutModules.length, "page", layoutData, loaderCookies);
 	}
 	const { data: pageData, deps: pageDeps } = page;
 
@@ -653,9 +647,9 @@ function loaderFailure(
 	depth: number,
 	origin: ErrorOrigin,
 	layoutData: (Record<string, any> | null)[],
-	// metadata() already answered the request: this failure reaches no one, so
-	// it must not be logged or shown in the dev overlay as a crash.
-	overruled = false,
+	// Logging goes through it: held until the outcome is known, dropped when
+	// metadata() answered the request (see LoaderCookies.report).
+	loaderCookies: LoaderCookies,
 ): unknown {
 	if (isRedirect(err) || err === METADATA_DECIDED) return err;
 	const partial = layoutData.map((d) => d ?? {});
@@ -664,11 +658,11 @@ function loaderFailure(
 		return err;
 	}
 	const kind = origin === "layout" ? "Layout" : "Page";
-	if (!overruled) {
+	loaderCookies.report(() => {
 		if (isDev) console.error(`${kind} server load error:`, err);
 		else console.error(`${kind} server load error:`, (err as Error).message ?? err);
 		if (isDev) reportDevErrorFromCatch(err);
-	}
+	});
 	const wrapped = new HttpError(500, "Internal Server Error");
 	stampErrorContext(wrapped, depth, origin, partial);
 	return wrapped;

@@ -3,7 +3,7 @@ title: Server Metadata
 description: Set page titles, meta tags, Open Graph, and lang attributes with the metadata() function.
 ---
 
-The `metadata()` function lets you define SEO and head tags for each page, running on the server alongside the layout loaders. The page's `load()` waits for it and receives its `data` as `metadata`. A `redirect()` or `error()` thrown here still decides the response and the page `load()` does not run, but the layout loaders have already started: their queries run, and only their cookies are discarded. Guard routes in the `handle` hook when that matters.
+The `metadata()` function lets you define SEO and head tags for each page, running on the server alongside the layout loaders. The page's `load()` waits for it and receives its `data` as `metadata`. A `redirect()` or `error()` thrown here still decides the response and the page `load()` does not run, but the layout loaders have already started: their queries run, and only their cookies are discarded. Guard routes in the `handle` hook when that matters. For the same reason, a value `metadata()` puts on `locals` may not be set yet when a layout loader reads it; set shared request values in `handle`.
 
 ## Basic Usage
 

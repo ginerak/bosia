@@ -82,6 +82,9 @@ export class LoaderCookies {
 			}
 		}
 		this.buffered.clear();
+		const reports = this.reports;
+		this.reports = [];
+		for (const log of reports) log();
 	}
 
 	/** Drop every loader's writes: something else decided the response. */
@@ -89,8 +92,20 @@ export class LoaderCookies {
 		this.done = true;
 		this.overruled = true;
 		this.buffered.clear();
+		this.reports = [];
 	}
 
-	/** True once something else (metadata()) decided the response. */
-	overruled = false;
+	private overruled = false;
+	private reports: Array<() => void> = [];
+
+	/**
+	 * Log a loader failure — held, like the cookies, until the outcome is known.
+	 * A failure in a request metadata() then answered reaches no one, so it is
+	 * dropped instead of printed as a crash (serially, that loader never ran).
+	 */
+	report(log: () => void): void {
+		if (this.overruled) return;
+		if (this.done) log();
+		else this.reports.push(log);
+	}
 }

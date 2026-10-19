@@ -136,3 +136,26 @@ test("a replayed write uses the options as they were at the call", () => {
 	lc.commit();
 	expect(seen).toEqual([{ path: "/" }]);
 });
+
+describe("LoaderCookies.report", () => {
+	test("held until commit, then run", () => {
+		const lc = new LoaderCookies(new CookieJar(""));
+		const logs: string[] = [];
+		lc.report(() => logs.push("crash"));
+		expect(logs).toEqual([]);
+		lc.commit();
+		expect(logs).toEqual(["crash"]);
+		lc.report(() => logs.push("late"));
+		expect(logs).toEqual(["crash", "late"]);
+	});
+
+	test("dropped when metadata() decided the response", () => {
+		const lc = new LoaderCookies(new CookieJar(""));
+		const logs: string[] = [];
+		lc.report(() => logs.push("before"));
+		lc.discard();
+		lc.report(() => logs.push("after"));
+		lc.commit();
+		expect(logs).toEqual([]);
+	});
+});
